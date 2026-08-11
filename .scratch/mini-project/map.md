@@ -181,6 +181,27 @@ subject of later maps, and several are listed under Out of scope below with that
   empty) and [the sprint plan](issues/08-sprint-plan.md), plus one new ticket,
   [Run the seeding pipeline](issues/11-run-seeding-pipeline.md).
 
+- [Design the demo and presentation narrative](issues/10-demo-narrative.md) — **one claim,
+  seven beats, ten minutes, no slides, and the demo deliberately breaks once.** Through-line:
+  *"I modelled a real hobby accurately, and the app fell out of the model."* The guidelines
+  document says **nothing** about the presentation (checked, not assumed) and the slot is
+  unannounced, so the talk is built for the hostile case — ~10 minutes, live app only, zero
+  slide budget — with an ordered add-back ladder if the slot is longer. Three rubric items are
+  **anchored** at the click where they're visible (data structures at the guard trip, OOP
+  design at the unowned play, classes/methods on the one code file — `GameCollection.Add`,
+  pre-opened); branching and loops are swept in the closing sentence, because naming all six
+  at their own click sounds recited. The new beat is a **deliberate on-stage failure**: re-add
+  a game already on the shelf and let the `Dictionary` guard refuse it — the only enforced rule
+  a user can trip, and watching it beats being told about it. Failure plan is **restart and
+  narrate, no recording**: the store seeds in its constructor, so a restart lands populated and
+  costs only the one live-logged play. Rehearsal is **outside the five hours**. Surfaced and
+  fixed a real conflict: the talk's payoff sat on **Statistics**, which ticket 07 puts *first*
+  on the cut list — moving the "played but not owned" proof to an `Owned?` column on Play Log
+  saves the payoff and leaves the cut order untouched. Hands seven build constraints to
+  [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md), chiefly that the
+  add-to-collection form is now **non-cuttable** and the sprint must end on a **runnable,
+  committed build**.
+
 ## Not yet specified
 
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
