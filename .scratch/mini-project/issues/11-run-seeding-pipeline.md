@@ -1,7 +1,9 @@
 # Run the seeding pipeline and commit the seed data
 
 Type: task
-Status: claimed
+Status: closed
+Resolved: 2026-08-11
+Assignee: claude + Brett (wayfinder session, 2026-08-11)
 Blocked by: 05, 12 (closed)
 Blocks: 08
 
@@ -151,11 +153,56 @@ assumption. Detail and the corrected checklist are in the
 no `playingtime = 0`. The seat invariant is safe against this data. **Re-run that check over
 the ranked ids** — a `maxplayers` of `0` there would make every play of that game throw.
 
-### Still to do
+## Resolution
 
-Brett's half, per the coaching contract: the LINQ-to-XML parse and the emit code, plus the
-domain model that must exist first (see the compile-order finding above). Nothing is blocked
-on access any more.
+**The pipeline is verified but deliberately not run. Execution moves into the sprint.**
+
+Brett's call, made against a recommendation to write the domain model now and emit the seed
+before the clock starts. Presented as a three-way choice on emit ordering; he chose **emit
+nothing yet** — no domain classes, no seed, nothing generated. Everything from the domain
+model onward happens inside sprint hour 1.
+
+So this ticket resolves **re-scoped, not completed as written**. It set out to do two
+things:
+
+1. **Retire the risk in an unproven pipeline — done, and it paid for itself.** All three
+   named unknowns are settled, two of them contrary to the map's assumptions (the CSV dump
+   is not token-accessible; the 202 queue is a non-event), plus two corrected facts (28
+   owned, not ~40; multi-designer at 20%). None of that has to be discovered on sprint day.
+2. **Produce and commit the seed data — deliberately deferred.** Moved into hour 1.
+
+Its remaining job was to unblock [the sprint plan](08-sprint-plan.md), and it has: that
+ticket now has a verified pipeline, real counts, and honest timings instead of assumptions.
+That is why this closes rather than staying open — the map cannot wait on work that now
+happens after the map is done.
+
+### The accepted cost, stated plainly
+
+**The seeding run is now inside the 5 hours**, and it is not small:
+
+- a **manual browser download** of the CSV dump (not automatable — verified);
+- ~10 `/thing` calls at 5-second spacing, plus the id union;
+- Brett writing the LINQ-to-XML parse and three emit steps;
+- **all three emit steps unproven**, against a compile-order trap that breaks the whole web
+  project's build until the domain model exists.
+
+Realistically **45–60 minutes of hour one**, and it is the riskiest hour to spend it in. The
+counter-argument for deferring is real and was Brett's: work done before the clock makes the
+5-hour figure a less truthful measure of the sprint, and this is a graded exercise in which
+that honesty has value.
+
+[The sprint plan](08-sprint-plan.md) must budget this explicitly rather than treating hour 1
+as "domain model then UI". This is the single largest input it receives from this ticket.
+
+### What carries forward
+
+- The [runbook](../research/seeding-runbook.md) is the sprint-day artifact — corrected
+  checklist, token handling, the field gap, the compile-order trap, the designer edge cases.
+- `MeepleLedger.Seeder/` is scaffolded, in the solution, building clean. Zero packages.
+- `BGG_TOKEN` is a User-scope env var; a newly-opened terminal picks it up.
+- **Do the CSV download the night before.** It needs a browser and a logged-in session, it
+  is the one step that cannot be retried quickly under time pressure, and it is not code —
+  so it costs nothing against the spirit of Brett's decision.
 
 ### Resolve by recording
 

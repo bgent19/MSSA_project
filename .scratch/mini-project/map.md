@@ -225,6 +225,29 @@ subject of later maps, and several are listed under Out of scope below with that
   seeder's location to [Run the seeding pipeline](issues/11-run-seeding-pipeline.md) and a
   minutes-not-hours hour-one step to [the sprint plan](issues/08-sprint-plan.md).
 
+- [Run the seeding pipeline and commit the seed data](issues/11-run-seeding-pipeline.md) —
+  **pipeline verified, execution deliberately deferred into the sprint.** Resolved re-scoped
+  rather than as written: the risk half is done, the seed half is Brett's choice to move into
+  hour 1, made against a recommendation to emit beforehand. Runbook:
+  [research/seeding-runbook.md](research/seeding-runbook.md). All three unproven steps
+  retired, **two contrary to what the map assumed**: the **CSV dump is not reachable with the
+  bearer token** (returns an Angular HTML shell — the token authorizes the XML API, not site
+  pages, so step 1 is a manual browser download), and the **202 retry queue is a non-event**
+  (`202` then `200`, ~2s — not the awkward endpoint ticket 03 flagged). `/thing` batched at 20
+  with `stats=1` is confirmed working, all five domain fields present on all 28 owned games,
+  zero missing, no zero player counts. Two corrected facts: the **owned shelf is 28, not ~40**
+  (no owned expansions — the filter changes nothing; ticket 09 over-estimated), so the catalog
+  needs ~172 ranked ids; and **20% of games have multiple designers**, promoting `Game.Designer`
+  from footnote to a real choice (take the first; guard with `FirstOrDefault() ?? "Unknown"`).
+  Surfaced the map's sharpest hazard — the emitted seed lands **inside** the web project, so
+  generating it **breaks the whole build** until the domain model exists. Accepted cost, stated
+  rather than buried: **45–60 minutes of hour 1** now goes to seeding, with all three emit
+  steps unproven. Scaffolded `MeepleLedger.Seeder/` (in the solution, 0 warnings, zero
+  packages); `BGG_TOKEN` stored as a User-scope env var, never in a commit. Hands the budget
+  line, the compile-order ordering constraint, and a night-before CSV download to
+  [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md) — **now unblocked, and the
+  last ticket on the map.**
+
 ## Not yet specified
 
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.

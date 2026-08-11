@@ -1,8 +1,8 @@
 # Write the hour-by-hour sprint plan
 
 Type: grilling
-Status: open
-Blocked by: 01, 04, 05, 06, 07, 09, 10, 12 (closed), 11
+Status: open — **unblocked, on the frontier**
+Blocked by: 01, 04, 05, 06, 07, 09, 10, 11, 12 (all closed)
 
 ## Question
 
@@ -65,9 +65,11 @@ did hand back a build constraint, plus three items the budget must actually cont
 **Constraints from [Choose the game data source](05-choose-data-source.md) and
 [Run the seeding pipeline](11-run-seeding-pipeline.md):**
 
-- **Seeding must be complete before hour 1**, or the app has nothing to render. Now blocked
-  on ticket 10, which also reports how long the run actually took — feed that number into the
-  budget honestly rather than assuming it is free.
+- ~~**Seeding must be complete before hour 1**~~ — **REVERSED by
+  [Run the seeding pipeline](11-run-seeding-pipeline.md).** Brett chose to emit nothing in
+  advance, so **the entire seeding run happens inside hour 1**, against a recommendation to
+  do it beforehand. See the block below; this is the largest single input this ticket
+  receives and the plan must not treat hour 1 as "domain model then UI".
 - **The solution has two projects**: the Blazor web app and an unreferenced seeder console
   project. Account for that in the hour-one setup, and note it interacts with the open
   repo-structure question in the map's fog.
@@ -77,6 +79,34 @@ did hand back a build constraint, plus three items the budget must actually cont
 - **A known trap to pre-decide a response for**: the seed is a generated C# file. If it fails
   to compile mid-sprint, that is a build break across the whole app. Decide in advance
   whether the response is to fix it or to revert to the last committed seed.
+
+**Constraints from [Run the seeding pipeline](11-run-seeding-pipeline.md)** — the pipeline is
+**verified but deliberately not run**. Working artifact:
+[research/seeding-runbook.md](../research/seeding-runbook.md).
+
+- **Budget the seeding run inside hour 1: realistically 45–60 minutes.** It is a manual
+  browser CSV download, ~10 `/thing` calls at 5s spacing, the id union, Brett's LINQ-to-XML
+  parse, and three emit steps — **all three emits unproven**. Sequencing hour 1 as
+  "domain model, then UI" would be wrong by roughly an hour.
+- **The compile-order trap is the sharpest hazard on the whole map.** The emitted seed lands
+  in `MeepleLedger/Data/`, inside the web project, so the moment it is generated **the entire
+  web app stops building** until `Game`, `OwnedGame`, `Condition`, `Play` and `PlayerResult`
+  exist. Order hour 1 so the domain model precedes the emit, or hour 1 opens on a broken
+  build. Pre-decide the response to a seed that will not compile: **revert the generated file
+  and re-emit**, never hand-patch 200 lines under time pressure.
+- **The CSV download should happen the night before.** It needs a logged-in browser session —
+  verified *not* reachable with the bearer token — and it is the one step that cannot be
+  quickly retried. It is not code, so it costs nothing against Brett's reasoning for
+  deferring the rest. Group it with the `GameCollection.Add` slide as night-before work.
+- **Real numbers, replacing estimates**: the owned shelf is **28** games, not ~40 (no owned
+  expansions — the filter changes nothing). So the catalog needs ~**172** ranked ids to reach
+  200, with less overlap than ticket 05 assumed. Data is clean: no zero player counts across
+  all 28.
+- **The 202 retry queue is a non-event** — `202` then `200`, ~2s. Ticket 03 flagged it as the
+  awkward endpoint; budget nothing for it.
+- **`BGG_TOKEN` is a User-scope env var.** A newly-opened terminal picks it up; a terminal
+  already open before it was set will not. Worth knowing at hour 1 when a `401` would look
+  like a dead token.
 
 The answer is the plan itself, written out in full — the artifact Brett works from on
 sprint day.
