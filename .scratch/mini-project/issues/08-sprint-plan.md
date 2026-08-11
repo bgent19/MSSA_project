@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 01, 04, 05, 06, 07, 09 (closed), 10, 11, 12
+Blocked by: 01, 04, 05, 06, 07, 09, 10 (closed), 11, 12
 
 ## Question
 
@@ -44,9 +44,31 @@ do not re-litigate these, sequence them:
 - **Four screens, three of them interactive.** Every screen with a button or form needs
   `@rendermode InteractiveServer`; a missing directive fails silently.
 
-Also now blocked on [Design the demo and presentation narrative](10-demo-narrative.md), which
-may hand back a build constraint — anything the talk track needs that the plan would not
-otherwise produce.
+**Constraints handed back by [Design the demo and presentation narrative](10-demo-narrative.md)**
+(now closed) — these are things the *talk* needs that the build would not otherwise produce.
+Sequence them; do not re-litigate them:
+
+- **The duplicate-add path must show a readable message on the Collection screen**, not an
+  unhandled exception page. A `try`/`catch` plus a string field, ~10 lines. The demo
+  deliberately trips this guard on stage, so a raw exception page turns the best beat into the
+  worst one.
+- **The add-to-collection form is non-cuttable.** It is the only way to trip that guard, and it
+  sits on the hour-one Collection screen. It cannot be traded for time.
+- **The Play Log needs an `Owned?` column** — one boolean lookup per row. This resolves a
+  conflict: the talk's payoff beat had been sitting on **Statistics**, which is *first* on the
+  cut list. With the column, **ticket 07's cut order stands unchanged**.
+- **The seed needs a chosen re-add target** — a specific known title already on the shelf, for
+  the guard trip. Decided before stage, not hunted for live.
+- **At least one honest explicit loop in Brett's own code.** LINQ arguably covers the "loops"
+  rubric item; a `for`/`foreach` in the seeder's emit code or a play-log aggregation removes
+  the argument. Cheap deliberately, awkward retrofitted.
+- **The sprint must end on a runnable, committed build.** Rehearsal happens *outside* the five
+  hours, so it needs something to rehearse with — a working tree mid-edit at the five-hour mark
+  fails this.
+- **No slide deck in the budget.** The talk is live-app-only by design.
+- **No rehearsal time inside the five hours** — decided deliberately, so the budget is all
+  build. The flip side is the previous point: the finish line is "demo-able", not "out of
+  time".
 
 **Constraints from [Choose the game data source](05-choose-data-source.md) and
 [Run the seeding pipeline](11-run-seeding-pipeline.md):**
