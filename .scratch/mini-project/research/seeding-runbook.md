@@ -14,8 +14,62 @@ that one is open alongside it.
 - **Scaffolding: done.** `MeepleLedger.Seeder/` exists as a sibling of `MeepleLedger/`,
   listed in `MSSA_project.slnx`, `net10.0`, nullable enabled, zero package references. The
   whole solution builds with 0 warnings.
-- **Pipeline: not yet run.** Blocked on the bearer token, which per
-  [ticket 09](../issues/09-verify-bgg-token.md) exists but is not stored anywhere.
+- **Token: stored**, Windows User-scope env var `BGG_TOKEN` (36-char UUID).
+- **All three unproven steps: verified live** (2026-08-11) — see below. Two came back
+  different from what the map assumed.
+- **Remaining: Brett's parse + emit code.** No seed data generated or committed yet.
+
+## Verified live — what the API actually does
+
+Smoke-tested against the real account, not assumed. The corrections matter more than the
+confirmations.
+
+| Step | Expected | Actual |
+|---|---|---|
+| `/thing?id=13` | `200` | **`200`** — token live |
+| `/collection` 202 queue | "the one endpoint with a retry loop", treated as a hazard | **`202` then `200` on the very next request, ~2s total.** A non-event |
+| `/thing?id=<20>&stats=1` | works, unverified at batch size | **`200`, 20/20 items, ~298 KB.** All five domain fields present on all 28 owned games; **zero** missing values |
+| CSV dump | needs an authenticated session | **Not reachable with the bearer token** — see below |
+| Owned shelf | ~40 games ([ticket 09](../issues/09-verify-bgg-token.md)) | **28** |
+
+### The CSV dump needs a browser, not the token
+
+`GET /data_dumps/bg_ranks` with a valid bearer token returns **`200` with
+`Content-Type: text/html`** — a generic Angular shell, no redirect, and no `.csv`, `.zip` or
+`amazonaws` link anywhere in the 10 KB body. The bearer token authorizes the **XML API**; it
+does not authorize site pages, which want a logged-in browser session.
+
+So pipeline step 1 is **not automatable** and should not be attempted in code. Download it
+by hand, once, from a logged-in browser, and point the seeder at the local file. Ticket 11
+already sanctioned exactly this — do not spend twenty minutes fighting it.
+
+`/xmlapi2/hot?type=boardgame` *does* work with the token and returns 50 items, but it is
+**hotness, not rank**, and 50 is far short of the ~172 ranked ids needed to reach a
+200-game catalog. It is a fallback for a demo-sized catalog, not a replacement for the dump.
+
+### The owned shelf is 28, not ~40 — and expansions are not why
+
+`own=1` **with and without** `excludesubtype=boardgameexpansion` both return exactly **28**,
+all of `subtype=boardgame`. So [ticket 05](../issues/05-choose-data-source.md)'s prediction
+that "Brett's owned count may come in slightly under 40" was right about the direction and
+wrong about the cause: there are no owned expansions to filter. Ticket 09's "~40" was simply
+an over-estimate.
+
+Immaterial to the plan — the catalog target is ~200 either way, and
+[the prototype](../issues/07-prototype-screens.md) wanted ~18 games on the Collection screen,
+so 28 clears it comfortably. Worth knowing so nobody hunts for 12 missing games.
+
+### Data quality across all 28 owned games
+
+`maxplayers = 0`: **none**. `minplayers = 0`: none. `playingtime = 0`: none. One game seats
+more than 10. So the seat invariant on `Play` is safe against this data — no defensive
+handling needed for the owned shelf. **Re-run this check against the ~172 ranked ids**, which
+are a much wider and weirder sample; a `maxplayers` of `0` there would make every play of
+that game throw.
+
+**4 of 20 games in the first batch had more than one designer — 20%, not a corner case.**
+Zero had no designer link and zero listed `(Uncredited)` in this sample, but keep the
+`FirstOrDefault ?? "Unknown"` guard for the ranked ids.
 
 ## Token handling
 
@@ -135,24 +189,25 @@ riskier path.
 
 Ordered. Steps 1–4 are the API run; 5–7 are emit and commit.
 
-- [ ] **0.** Export `BGG_TOKEN` in the shell (above). Confirm with one `/thing?id=13` call
-      that you get `200`, not `401`, *before* writing any loop.
-- [ ] **1.** Download the CSV dump from `https://boardgamegeek.com/data_dumps/bg_ranks`.
-      **Unproven step** — it needs an authenticated session, and it may be a browser download
-      rather than an `HttpClient` one. If it is, just download it by hand and commit it, or
-      point the seeder at the local file. Do not spend twenty minutes automating a
-      once-ever download.
+- [x] **0.** ~~Token in the environment; confirm `200` not `401` before writing any loop.~~
+      **Done** — `BGG_TOKEN` is a User-scope env var, `/thing` returns `200`.
+- [ ] **1.** **Download the CSV dump by hand**, from a logged-in browser, at
+      `https://boardgamegeek.com/data_dumps/bg_ranks`. **Do not try to fetch it in code** —
+      verified above that the bearer token does not work on it. Save it outside the repo or
+      add it to `.gitignore`; it is large and it is an input, not a deliverable.
       Filter out `is_expansion = 1`; take the top ids by `rank`.
-- [ ] **2.** `GET /collection?username=TheGentleBean&own=1&excludesubtype=boardgameexpansion`.
-      **Expect `202` with a queued-message body, not an error** — sleep ~5s and re-request
-      until `200`. This is the only endpoint that does this. Record how many retries it
-      actually took.
-- [ ] **3.** Union step 1 and step 2 ids, dedupe. Expect heavy overlap, so pull enough ranked
-      ids that the merge lands at **~200 unique**. Check the count before spending API calls.
+- [x] **2.** ~~`/collection` 202 retry loop.~~ **Done and it is a non-event** — `202` then
+      `200` on the next request, ~2s. Still write the retry loop (it is correct, and a cold
+      queue may be slower), but do not budget time for it. **28 owned ids**, saved.
+- [ ] **3.** Union step 1 and step 2 ids, dedupe. With only **28** owned, you need ~**172**
+      ranked ids to reach 200 unique; overlap will be less than ticket 05 assumed, because
+      the shelf is smaller. Check the count before spending API calls.
 - [ ] **4.** `GET /thing?id=<20 ids>&stats=1`, **20 ids per call, 5 seconds between calls**,
-      ~10 calls. Throttling shows up as `500`/`503`, not `429` — if you see one, you went too
-      fast; wait and redo that batch. **Save every raw response to disk** as you go, so a
-      parsing bug does not cost another ten API calls.
+      ~10 calls. **Batch-of-20 is verified working** (`200`, 20/20 items, ~298 KB) — at that
+      size expect ~1.5 MB of XML for 200 games, so stream or buffer sensibly. Throttling
+      shows up as `500`/`503`, not `429` — if you see one, you went too fast; wait and redo
+      that batch. **Save every raw response to disk** as you go, so a parsing bug does not
+      cost another ten API calls. Re-run the zero-player-count check over the ranked ids.
 - [ ] **5.** Parse with LINQ-to-XML (see the research doc's three shape gotchas: `value=`
       attributes, `type="primary"` names, double-encoded description — though the description
       is now discarded, so gotcha 3 may not apply). Emit
