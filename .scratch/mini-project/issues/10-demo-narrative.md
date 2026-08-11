@@ -39,5 +39,21 @@ To settle:
   constraint on [Write the hour-by-hour sprint plan](08-sprint-plan.md) — and it must land
   there before the plan is written, not after.
 
+**Material added by [Design the storage seam](06-storage-seam.md)**, for the
+"what was deliberately left out" beat and the code-on-screen question:
+
+- **The judgement line, ready-made:** "storage is in-memory behind an interface,
+  deliberately, so the database swap is one new class and one changed line." That reframes a
+  missing database as a designed seam. The seam's own file-count test — one file changed, two
+  added — is the evidence behind the claim if anyone presses.
+- **Name the limitations rather than hiding them.** The singleton store is not thread-safe,
+  and a process restart loses anything typed live. Stating both reads as understanding;
+  silence reads as not having noticed.
+- **Strong code-on-screen candidate:** `ILedgerStore` is three members long and fits on one
+  slide beside its two registration lines — interfaces, encapsulation, and DI in a single
+  screenful. Weigh it against a domain class with its invariant.
+- **Do not promise persistence.** The click path's live write survives navigation but not a
+  restart; the talk track must not imply otherwise.
+
 Output: the talk track, written out beat by beat against the click path, plus any build
 constraint it hands to the sprint plan.

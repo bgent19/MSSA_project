@@ -130,13 +130,31 @@ subject of later maps, and several are listed under Out of scope below with that
   presentation out of the fog as
   [Design the demo and presentation narrative](issues/10-demo-narrative.md).
 
+- [Design the storage seam](issues/06-storage-seam.md) — **one interface, three members, one
+  singleton.** `ILedgerStore { GameCollection Collection; PlayLog PlayLog; void Save(); }`,
+  with the catalog *outside* it as a plain singleton with no interface — the ledger is your
+  data; the world is not yours to save. The load-bearing choice: the store **hands out
+  aggregates rather than being the collection**, so every invariant and filter stays on the
+  classes Brett wrote — the tutorial shape (`IGameStore.Add/Remove/GetAll`) was rejected
+  precisely because it hollows out the graded artifact. Storage is **pure in-memory,
+  re-seeded at startup**, not JSON on disk: rehearsal writes would permanently fill the
+  demo's deliberate gap, and restart-as-reset-button beats restart-survival. `Save()` is a
+  deliberately empty method kept for its **three call sites** — which is also what makes
+  **sync** safe, since async would buy a three-line future edit at the price of the
+  `async void` circuit-killer on sprint day. Registration is **`AddSingleton`, never
+  `AddScoped`**: Blazor's "scoped" means *per circuit* and dies on F5, which on stage would
+  silently erase the one live write. Map two touches **one file changed, two added**, so the
+  seam passes its own test. Also settles the project-structure fog item — one project,
+  `Domain/` `Storage/` `Data/` folders — and records one honest wrinkle: the `Dictionary`
+  backing `GameCollection` will not map to EF Core for free. Hands a startup-synchronous
+  seeding constraint to [Choose the game data source](issues/05-choose-data-source.md), a
+  build order and two trap responses to
+  [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md), and a judgement line plus
+  the code-on-screen candidate to
+  [Design the demo and presentation narrative](issues/10-demo-narrative.md).
+
 ## Not yet specified
 
-- **Repo and solution structure for the long haul.** One project or a class library plus a
-  web project? Matters for the later maps (a domain library is easier to reuse from an
-  Azure Function or a chatbot), costs a little ceremony now. Revisit once
-  [Design the storage seam](issues/06-storage-seam.md) shows how many moving parts there
-  actually are.
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
   Probably a later map, but worth a deliberate decision rather than a silent omission.
 - **What map two opens with.** Likely auth and EF Core, in some order, but the order

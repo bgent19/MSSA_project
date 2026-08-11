@@ -76,5 +76,22 @@ now answered *yes* rather than open:
   [Model the domain](02-domain-model.md) a *demo requirement*, not just a modelling worry —
   a catalog identical to the collection kills the beat.
 
+**Constraint added by [Design the storage seam](06-storage-seam.md).** The seam settled that
+`ILedgerStore` and `GameCatalog` are both **singletons constructed at application startup**,
+synchronously, from seed data already available in-process. Consequences for this ticket:
+
+- **A live API call at construction time is ruled out.** Whatever this ticket chooses, the
+  seed must be present in-process when `Program.cs` runs its two registration lines. That
+  reinforces the build-time-seeding incumbent from
+  [Survey board game data sources](03-survey-data-sources.md) rather than settling it — an
+  API path is not impossible, but it can no longer be "fetch on startup."
+- **The seed-location question (C# static class vs embedded JSON) now has a sharper edge.**
+  JSON costs a deserializer call *on the startup path*, where a failure takes the whole app
+  down rather than degrading one screen. Weigh that alongside the rubric argument the survey
+  already made.
+- **Shape required:** enough for `new GameCatalog(...)` plus a pre-populated `GameCollection`
+  and `PlayLog` — the seam hands out aggregates, so seeding means constructing aggregates,
+  not handing over loose rows.
+
 The live-demo failure mode is the thing to weigh most heavily. A dependency that fails in
 front of the class costs more than the feature is worth.

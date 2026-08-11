@@ -44,6 +44,23 @@ do not re-litigate these, sequence them:
 - **Four screens, three of them interactive.** Every screen with a button or form needs
   `@rendermode InteractiveServer`; a missing directive fails silently.
 
+**Inputs already fixed by [Design the storage seam](06-storage-seam.md)** — sequence these,
+don't re-open them:
+
+- **Build order:** domain classes → `ILedgerStore` + `InMemoryLedgerStore` → the two
+  `Program.cs` registration lines → first component. The seam is roughly two small files.
+- **The seam cannot be cut.** Three of the six rubric fundamentals — interfaces,
+  encapsulation, dependency injection — live there and nowhere else. It belongs above the
+  cut line with the Collection screen.
+- **Two pre-decided trap responses**, both silent failures, to fold into the hour-by-hour
+  checkpoints alongside the `@rendermode` one:
+  - `AddSingleton`, never `AddScoped`. Blazor's "scoped" is per *circuit* and dies on F5 —
+    a refresh would wipe the demo's live write with no error.
+  - Sync event handlers, never `async void`. An `async void` handler kills the circuit
+    silently; the page simply stops responding.
+- **Project structure is settled** — one project, `Domain/` `Storage/` `Data/` folders. This
+  is ceremony Claude may scaffold before the clock starts; every class inside is Brett's.
+
 Also now blocked on [Design the demo and presentation narrative](10-demo-narrative.md), which
 may hand back a build constraint — anything the talk track needs that the plan would not
 otherwise produce.
