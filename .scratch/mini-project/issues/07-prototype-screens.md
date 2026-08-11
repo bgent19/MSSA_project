@@ -31,4 +31,11 @@ To settle:
 - What is the minimum screen set that still tells a whole story? That set is the hour-one
   target; everything else is optional.
 
+**Constraint from [Verify the toolchain end to end](04-verify-toolchain.md):** interactivity
+is **per-page**. Every screen with a button, a form, or an `@onclick` needs
+`@rendermode InteractiveServer` at the top of the `.razor` file. Omitting it renders a
+page that looks perfectly correct but whose clicks silently do nothing — no error, no
+exception, no breakpoint hit. When settling the screen inventory, mark each screen
+interactive or static, so sprint-day Brett types the directive without having to think.
+
 Link any prototype artifacts from the answer.

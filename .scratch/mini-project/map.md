@@ -93,6 +93,22 @@ subject of later maps, and several are listed under Out of scope below with that
   [Choose the game data source](issues/05-choose-data-source.md); and a fact to nail down,
   [Confirm BGG API access is a working token](issues/09-verify-bgg-token.md).
 
+- [Verify the toolchain end to end](issues/04-verify-toolchain.md) — the whole loop works on
+  Brett's machine: scaffold, build (0 warnings), serves a page, hot reload, and a
+  **breakpoint in an event handler hits** — so the console-app debugging intuition transfers
+  and the Blazor Server bet holds in practice. Sprint-day command is one line:
+  `dotnet new blazor -n MeepleLedger -int Server -au None`. Repo pushed private to
+  [github.com/bgent19/MSSA_project](https://github.com/bgent19/MSSA_project), branch `main`,
+  settling this ticket's open GitHub question. Two findings: (1) Brett's first scaffold used
+  Individual Accounts, pulling in Identity + EF Core + a mandatory LocalDB connection string
+  against two settled constraints — re-scaffolded with `-au None`, cutting `Program.cs` from
+  ~60 lines to 27 with **zero package references**; (2) the big one — `-int Server` gives
+  **per-page** interactivity, so any screen with a button or form needs
+  `@rendermode InteractiveServer` or its clicks silently do nothing with no error at all.
+  That second finding is now a constraint on
+  [Prototype the screens and the demo click path](issues/07-prototype-screens.md). Also:
+  "Apply Hot Reload on File Save" was unchecked in VS and had to be turned on.
+
 ## Not yet specified
 
 - **The demo and presentation narrative.** There is a graded presentation at the end, and
