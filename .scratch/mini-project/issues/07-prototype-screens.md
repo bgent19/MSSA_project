@@ -39,6 +39,24 @@ page that looks perfectly correct but whose clicks silently do nothing — no er
 exception, no breakpoint hit. When settling the screen inventory, mark each screen
 interactive or static, so sprint-day Brett types the directive without having to think.
 
+**Constraints from [Choose the game data source](05-choose-data-source.md):**
+
+- **The app opens onto populated data, not an empty state.** ~200 catalog games, ~40 owned,
+  ~60-80 seeded plays. The "empty app being filled in live" demo shape named above is
+  therefore *off the table* — settle the click path for exploring a populated app, with one
+  play logged live to show the write path.
+- **A search box filtering the catalog is already a settled component**, and it appears in
+  **two** flows — adding a game to the collection, and choosing the game when logging a play.
+  Design it once. It is also a rubric-positive surface (LINQ filtering over a collection),
+  so it belongs somewhere visible.
+- **The seeded play history deliberately contains plays of unowned games.** A screen or view
+  that makes that visible is where the domain model's central property — plays independent of
+  ownership — becomes demonstrable. Worth a deliberate place in the click path.
+- **No manual game entry anywhere.** There is no "add a game not in the list" affordance to
+  design; the catalog is closed.
+- Statistics driven by LINQ over ~60-80 plays now has real data behind it, which strengthens
+  the case for the statistics view being essential rather than a stretch goal.
+
 Link any prototype artifacts from the answer.
 
 ## Resolution

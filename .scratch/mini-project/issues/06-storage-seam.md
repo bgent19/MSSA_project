@@ -171,4 +171,4 @@ protecting. It is not a promise that map two is free.
   [Choose the game data source and seeding strategy](05-choose-data-source.md).
 - **Fog graduated.** The moving parts are now countable — ~8 domain files, 4 storage files, a
   seed file — which sharpens the map's repo-structure question into
-  [Decide the project and folder structure](10-solution-structure.md).
+  [Decide the project and folder structure](12-solution-structure.md).

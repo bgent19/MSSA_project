@@ -147,6 +147,40 @@ subject of later maps, and several are listed under Out of scope below with that
   the seam protects is the domain model and the components. Graduated fog into
   [Decide the project and folder structure](issues/12-solution-structure.md).
 
+- [Confirm BGG API access is a working token](issues/09-verify-bgg-token.md) — **access is
+  genuine**: an approved application with a bearer token, not merely a BGG user account, so
+  the week-plus approval queue is not in our path. Verified `200` on a live `/thing` call.
+  Username **TheGentleBean**, collection **~40 games**. This makes ticket 03's build-time
+  seeding recommendation live rather than hypothetical, and the real 40-game shelf is itself
+  a strong seed candidate — one `/collection` call, small enough to hand-curate, and
+  genuinely lived-in rather than typed to fill a demo. Correspondingly weakens the
+  CSV-dump-of-thousands route, which existed mainly to close the unlisted-game gap. One
+  loose end: **the token is not stored anywhere yet** — user-secrets or an untracked file,
+  never a commit; and if seeding is build-time-only it need never reach app config at all.
+
+- [Choose the game data source and seeding strategy](issues/05-choose-data-source.md) —
+  **build-time seeding, no runtime network at all.** The BGG API runs once, offline, on
+  Brett's machine; its output is committed as C# source; the running app never opens a
+  socket. Chosen because it *keeps* the rubric-positive LINQ-to-XML parsing and discards only
+  the demo risk — ticket 03 having established that BGG failure is total (`401`), not
+  graceful. Seven decisions: catalog of **~200 games** (Brett's ~40 owned plus BGG
+  top-ranked); seed as a **C# `static readonly List<Game>`**, not JSON, because it cannot
+  fail at runtime and ~200 games is only ~200 lines; **~60-80 seeded plays** as fixed data,
+  not generated at startup; a **search box filtering the catalog** as the one picker,
+  reused by both the add-to-collection and log-a-play flows; the **seeder committed as an
+  unreferenced console project**, since a throwaway script would put the parsing code outside
+  the graded deliverable; **expansions excluded**, as ticket 02's model has no expansion type
+  and their blank player counts would break the seat invariant. **Closes ticket 02's
+  unlisted-game gap by width, not an escape hatch** — a catalog wider than the shelf is what
+  makes plays-independent-of-ownership demonstrable at all, and there is no manual entry
+  anywhere. The CSV dump loses the catalog job (it has no player counts, so it cannot enforce
+  Brett's own invariant) but keeps a better one: supplying top-ranked ids to feed `/thing`.
+  Also resolves ticket 09's loose end — build-time-only seeding means the token never reaches
+  app configuration. Hands down constraints on
+  [Prototype the screens](issues/07-prototype-screens.md) (the app opens populated, not
+  empty) and [the sprint plan](issues/08-sprint-plan.md), plus one new ticket,
+  [Run the seeding pipeline](issues/11-run-seeding-pipeline.md).
+
 ## Not yet specified
 
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
