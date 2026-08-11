@@ -61,5 +61,20 @@ leaving that unaddressed.
 - **If a real collection import is in play**, note `/collection` is the one endpoint with
   the 202-retry queue, and that its default subtype mislabels expansions.
 
+**Constraints added by [Prototype the screens and the demo click path](07-prototype-screens.md).**
+That ticket settled a **populated start** — the app opens full, roughly 18 games and ~40 plays
+across several months, with one deliberate gap filled live on stage. Two consequences land
+directly on this ticket, and the fourth bullet above ("should seed data include plays?") is
+now answered *yes* rather than open:
+
+- **Seed data must include plays, not just games.** ~40 of them, dated across several months
+  so `RecentFirst()` and `MostPlayed()` have something to chew on. Volume is the point:
+  filtering four rows does not read as filtering.
+- **The catalog must contain games that are *not* in the collection.** The demo's strongest
+  beat picks an unowned game in the log form and then shows it on the stats screen as
+  "played but not owned". That makes the unlisted-game gap from
+  [Model the domain](02-domain-model.md) a *demo requirement*, not just a modelling worry —
+  a catalog identical to the collection kills the beat.
+
 The live-demo failure mode is the thing to weigh most heavily. A dependency that fails in
 front of the class costs more than the feature is worth.
