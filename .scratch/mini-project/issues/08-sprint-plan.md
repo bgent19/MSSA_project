@@ -1,7 +1,8 @@
 # Write the hour-by-hour sprint plan
 
 Type: grilling
-Status: open — **unblocked, on the frontier**
+Status: claimed
+Assignee: claude + Brett (wayfinder session, 2026-08-11)
 Blocked by: 01, 04, 05, 06, 07, 09, 10, 11, 12 (all closed)
 
 ## Question
