@@ -1,7 +1,7 @@
 # Run the seeding pipeline and commit the seed data
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: 05, 12 (closed)
 Blocks: 08
 
