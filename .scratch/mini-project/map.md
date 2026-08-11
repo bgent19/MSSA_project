@@ -248,12 +248,45 @@ subject of later maps, and several are listed under Out of scope below with that
   [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md) — **now unblocked, and the
   last ticket on the map.**
 
+- [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md) — **five gated sessions, ~5h of
+  estimates under ~6h50 of caps, and the cut list repurposed as the slack.** The plan itself is
+  [research/sprint-plan.md](research/sprint-plan.md). Costing the committed work honestly came to
+  **290 of 300 minutes** — ten minutes of slack against three unproven emits and an unfamiliar
+  framework — so the baseline **drops Statistics and Play Log filtering into an "if ahead" tier**,
+  making a cut a non-event rather than a loss, and the honest figure is stated as **~6.5 hours, of
+  which the first five produce a completely demoable app**. Sessions are **split, not one sitting**
+  (cut decisions get made rested), each ending **at its checkpoint or its cap, whichever comes
+  first, with the shortfall paid out of the if-ahead tier and never out of the next session** —
+  that rule, not the grouping, is the load-bearing part. **Session 1 ends with nothing on screen**,
+  deliberately: screen-first exists to retire stack risk, and
+  [ticket 04](issues/04-verify-toolchain.md) already retired it, so the only cost is morale,
+  answered with a scheduled 5-minute look-at-it beat. Two properties protected by the ordering:
+  **after Session 3 the presentation is deliverable** (its checkpoint *is* click-path step 5), and
+  after Session 1 no unproven step survives into a session containing UI work. Settled the map's
+  sharpest un-pre-decided trap: because [the store is a singleton seeded in its
+  constructor](issues/06-storage-seam.md), a seed row violating an invariant doesn't make a bad row
+  — **the app fails to start** inside a DI exception, reading on stage as "Blazor is broken". So the
+  **seeder filters at emit time**; an internal validation-bypassing load path was rejected because
+  *an invariant you can bypass is not an invariant*, and it would undercut the talk's whole spine.
+  Found that **nothing downstream actually depends on the figure 200** — only *catalog wider than
+  shelf* — so the catalog became a **range ~75–200** and the fragile manual CSV download got a
+  pre-sanctioned `/hot` fallback needing no decision on the day, with Session 0 moved **two days
+  early** so a retry is free. **One commit is load-bearing, not hygiene**: the pre-emit commit,
+  without which "revert and re-emit" — the pre-decided response to a seed that won't compile —
+  simply does not exist. Corrected a **stale premise in the ticket's own body** (it still claimed
+  real data existed before the clock, reversed by
+  [ticket 11](issues/11-run-seeding-pipeline.md)). Add-back order at 8–12h ends with the
+  **game-detail screen repaying [ticket 07](issues/07-prototype-screens.md)'s accepted cost** of no
+  per-game win rate, and **clears the testing fog** — not this sprint; three invariant tests at
+  position 4. **This was the destination ticket: the map is complete.**
+
 ## Not yet specified
 
-- **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
-  Probably a later map, but worth a deliberate decision rather than a silent omission.
 - **What map two opens with.** Likely auth and EF Core, in some order, but the order
   depends on what the sprint actually produces.
+
+<!-- "Testing" graduated and was answered by ticket 08 rather than becoming a ticket:
+     not in this sprint; first tests are three invariant tests at add-back position 4. -->
 
 ## Out of scope
 
