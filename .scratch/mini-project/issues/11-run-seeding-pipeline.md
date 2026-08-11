@@ -60,6 +60,59 @@ It goes in the seeder's environment or .NET user-secrets. Since seeding is build
 the token never needs to reach the web app's configuration at all. If it leaks, revoke and
 regenerate at `https://boardgamegeek.com/applications`.
 
+## Progress (wayfinder session, 2026-08-11)
+
+Working asset: **[research/seeding-runbook.md](../research/seeding-runbook.md)** — the
+operational checklist, the token handling, and the teaching for Brett's half. It does not
+repeat the API facts; read it alongside
+[board-game-data-sources.md](../research/board-game-data-sources.md).
+
+**Done (ceremony, per the coaching contract):** `MeepleLedger.Seeder/` scaffolded as a
+sibling of `MeepleLedger/`, `net10.0`, nullable on, **zero package references**; added to
+`MSSA_project.slnx`. Whole solution builds, **0 warnings** (commit `f4c1e74`).
+
+**Token handling decided: environment variable `BGG_TOKEN`, not user-secrets.** User-secrets
+would cost the seeder two NuGet references to solve a problem it does not have — one person,
+one machine, run by hand. Zero dependencies wins. User-secrets is the right lesson when map
+two puts a connection string in the *web app's* config. Note `Authorization` is a restricted
+header: it needs `DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(...)`,
+not `.Add(...)`.
+
+**Not started:** every step that touches the API, and all of Brett's parsing/emit code.
+
+### Two findings the ticket did not anticipate
+
+**1. The research doc's parse sketch does not match the domain model.** It was written
+against a hypothetical `Game` before [ticket 02](02-domain-model.md) settled the real one.
+The seed must emit exactly five properties and **discard** `BggId`, `Year`, `Description`,
+`ImageUrl`, `Categories`. Conversely `Designer` — which the domain model wants and the
+sketch never fetched — is a `<link type="boardgamedesigner">` and there are often **several
+per game**. Recommendation: take the first only. Two edge cases that will otherwise throw
+partway through a 200-game run: `(Uncredited)` is a real value, and some games have no
+designer link at all, so `.First()` must be `.FirstOrDefault() ?? "Unknown"`.
+
+**2. The emit step breaks the build — this is the one worth deciding before running.** The
+seed lands in `MeepleLedger/Data/`, inside the web project, so it compiles with the web app.
+But `Game`, `OwnedGame`, `Play`, `PlayerResult` and `Condition` are hour-one work and do not
+exist. So the generated file cannot compile, and committing it leaves the repo **broken at
+the start of hour 1** with the seed's correctness unverified until the clock is already
+running.
+
+The fix is to write the domain model *before* the emit step, so `dotnet build` proves the
+seed compiles with no clock running. The catalog needs only `Game`; the collection needs
+`OwnedGame` + `Condition`; the plays need `Play` + `PlayerResult` — which is most of the
+model, so it is close to all-or-nothing. Preferred: **write the whole domain model now**,
+leaving hour one UI-only. The honest counter-argument — that this makes the 5-hour figure a
+less truthful measure of the sprint — is real, and belongs in
+[the sprint plan](08-sprint-plan.md) as a recorded fact rather than a reason to take the
+riskier path. **This is a live constraint on ticket 08 regardless of which way it goes.**
+
+### Blocked on
+
+**The BGG bearer token.** [Ticket 09](09-verify-bgg-token.md) confirmed it exists and works,
+but deliberately stored it nowhere. Nothing in steps 1–4 can run without it, and it is
+Brett's to supply — it must not be pasted anywhere that reaches a commit.
+
 ### Resolve by recording
 
 The final catalog count, the owned count after expansion filtering, the play count, how long
