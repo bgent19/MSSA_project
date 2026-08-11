@@ -1,7 +1,7 @@
 # Decide the project and folder structure
 
 Type: grilling
-Status: open
+Status: claimed
 Blocked by: 06 (closed)
 Blocks: 08
 
