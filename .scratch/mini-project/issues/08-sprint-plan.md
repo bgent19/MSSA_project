@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 01, 04, 05, 06, 07
+Blocked by: 01, 04, 05, 06, 07 (closed), 10
 
 ## Question
 
@@ -32,6 +32,21 @@ To settle:
   pre-decided response to each?
 - If the true budget turns out to be closer to the guidelines' 8-12 hours, what are the
   first things added back?
+
+**Inputs already fixed by [Prototype the screens and the demo click path](07-prototype-screens.md)** —
+do not re-litigate these, sequence them:
+
+- **Hour-one target:** the Collection screen and the Log-a-play form. That pair alone tells a
+  whole story.
+- **Cut order, pre-decided:** Statistics → Play Log's filtering → Play Log entirely.
+- **Styling is time-boxed and goes last**, after the cut list is clear. It is cheap for Brett
+  and therefore tempting, and it scores nothing.
+- **Four screens, three of them interactive.** Every screen with a button or form needs
+  `@rendermode InteractiveServer`; a missing directive fails silently.
+
+Also now blocked on [Design the demo and presentation narrative](10-demo-narrative.md), which
+may hand back a build constraint — anything the talk track needs that the plan would not
+otherwise produce.
 
 The answer is the plan itself, written out in full — the artifact Brett works from on
 sprint day.
