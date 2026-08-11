@@ -109,17 +109,29 @@ subject of later maps, and several are listed under Out of scope below with that
   [Prototype the screens and the demo click path](issues/07-prototype-screens.md). Also:
   "Apply Hot Reload on File Save" was unchecked in VS and had to be turned on.
 
+- [Design the storage seam](issues/06-storage-seam.md) — **two interfaces, five members,
+  zero methods**: `IGameCatalogSource { Catalog }` and `IMeepleStore { Collection, PlayLog }`,
+  both `AddSingleton`, both sync. The seam is a **persistence port, not a repository** — it
+  hands over fully-built aggregates and never sees an `OwnedGame`, so the domain model stays
+  the graded artifact. Two findings drive the rest: `AddScoped` in Blazor Server is
+  **per circuit and dies on F5**, which would empty the collection mid-demo, so singleton is
+  both safe *and* correct while there is one user; and because a singleton holds the
+  aggregates in fields, `Collection.Add(x)` has *already* persisted — so `Save` is deleted
+  rather than stubbed, since a no-op you must remember to call fails **invisibly today** and
+  silently in map two. Today's implementation is **in-memory seeded in the constructor** (a
+  mid-demo restart lands on a populated app, and JSON would need a whole DTO layer to get
+  past the private `_games`/`_plays`). Map two touches **two files** —
+  `EfMeepleStore.cs` plus one line of `Program.cs`, with zero component or domain changes —
+  though honestly: EF can't be a singleton, so map two will likely revisit the shape. What
+  the seam protects is the domain model and the components. Graduated fog into
+  [Decide the project and folder structure](issues/10-solution-structure.md).
+
 ## Not yet specified
 
 - **The demo and presentation narrative.** There is a graded presentation at the end, and
   the story it tells should arguably constrain what gets built. Can't be sharpened until
   [Prototype the screens and the demo click path](issues/07-prototype-screens.md) settles
   what the app actually does. Do not let this fall off the map — it is graded.
-- **Repo and solution structure for the long haul.** One project or a class library plus a
-  web project? Matters for the later maps (a domain library is easier to reuse from an
-  Azure Function or a chatbot), costs a little ceremony now. Revisit once
-  [Design the storage seam](issues/06-storage-seam.md) shows how many moving parts there
-  actually are.
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
   Probably a later map, but worth a deliberate decision rather than a silent omission.
 - **What map two opens with.** Likely auth and EF Core, in some order, but the order
