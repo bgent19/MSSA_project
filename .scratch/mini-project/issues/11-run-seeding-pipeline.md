@@ -2,7 +2,7 @@
 
 Type: task
 Status: open
-Blocked by: 05 (closed)
+Blocked by: 05, 12 (closed)
 Blocks: 08
 
 ## Question
@@ -37,6 +37,16 @@ discovering any of them on sprint day would cost the sprint:
 6. Generate ~60-80 plays over the past ~12 months, weighted so favourites recur, **including
    3-5 plays of catalog games that are not in the collection**. Emit as fixed C# data.
 7. Commit the generated files. Hand-curate the ~40 owned rows by eye.
+
+### Where the seeder lives (from [ticket 12](12-solution-structure.md))
+
+`MeepleLedger.Seeder/`, a **sibling** of `MeepleLedger/` — never nested, or the web project's
+globbing tries to compile it. Namespace `MeepleLedger.Seeder`. **Listed in `MSSA_project.slnx`**
+(one line) so an examiner can open the parsing code.
+
+**No project reference in either direction.** The seeder emits C# *source text* and never
+constructs a `Game`, so it does not need the domain types; the emitted files compile inside the
+web project. Step 5 writes to `MeepleLedger/Data/` — namespace `MeepleLedger.Data`.
 
 ### Division of labour
 

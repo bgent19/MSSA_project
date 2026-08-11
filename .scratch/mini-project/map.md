@@ -203,6 +203,28 @@ subject of later maps, and several are listed under Out of scope below with that
   owned" badge on the Play Log**, which moves the proof onto the screen where the live write
   lands and makes step 5 prove the point on save.
 
+- [Decide the project and folder structure](issues/12-solution-structure.md) — **one project,
+  three folders, and namespaces that follow them.** `Domain/`, `Storage/`, `Data/` under
+  `MeepleLedger/`, plus a sibling `MeepleLedger.Seeder/` console project. The class library was
+  declined — it buys structurally enforced dependency direction, but **folder-mapped namespaces
+  make the later split a pure file move**: create `MeepleLedger.Domain`, drag 8 files in, and
+  every `using` and namespace declaration stays byte-identical, because no namespace ever
+  mentioned the project. So the namespace choice is load-bearing, not cosmetic — it is what makes
+  one project safe. `Data/` stays separate from `Storage/` on the line *generated files you never
+  open* vs *code you wrote*, so `Storage/` reads as four hand-written files rather than four
+  buried under 200 lines of game titles. `_Imports.razor` gains exactly two `@using` lines —
+  `MeepleLedger.Data` is **excluded on purpose**, since the confusing Razor error it would prevent
+  can only fire when a component reaches for seed data, which is the thing that should not
+  compile. Corrected two stale premises in its own body: the seed is C# source, not JSON, so
+  `wwwroot`/embedded-resource were dead options; and `JsonGameCatalogSource` is really
+  `SeededGameCatalogSource`. The seeder needs **no project reference in either direction** — it
+  emits source *text* — but it is listed in the `.slnx`, since code an examiner cannot open is not
+  evidence; accepted risk is Visual Studio launching the wrong startup project. Structure gets
+  **no presentation beat** — a folder tour shows organization, not skill — but a one-sentence Q&A
+  answer that lands the dependency-direction point we declined to pay for structurally. Hands the
+  seeder's location to [Run the seeding pipeline](issues/11-run-seeding-pipeline.md) and a
+  minutes-not-hours hour-one step to [the sprint plan](issues/08-sprint-plan.md).
+
 ## Not yet specified
 
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
