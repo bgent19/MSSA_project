@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 01, 04, 05, 06, 07
+Blocked by: 01, 04, 05, 06, 07, 10
 
 ## Question
 
@@ -32,6 +32,22 @@ To settle:
   pre-decided response to each?
 - If the true budget turns out to be closer to the guidelines' 8-12 hours, what are the
   first things added back?
+
+**Constraints from [Choose the game data source](05-choose-data-source.md) and
+[Run the seeding pipeline](10-run-seeding-pipeline.md):**
+
+- **Seeding must be complete before hour 1**, or the app has nothing to render. Now blocked
+  on ticket 10, which also reports how long the run actually took — feed that number into the
+  budget honestly rather than assuming it is free.
+- **The solution has two projects**: the Blazor web app and an unreferenced seeder console
+  project. Account for that in the hour-one setup, and note it interacts with the open
+  repo-structure question in the map's fog.
+- **"Get one ugly screen rendering real data in hour one" is now much cheaper**, because real
+  data already exists before the clock starts. That materially strengthens the argument the
+  ticket already raised for that ordering over domain-classes-first.
+- **A known trap to pre-decide a response for**: the seed is a generated C# file. If it fails
+  to compile mid-sprint, that is a build break across the whole app. Decide in advance
+  whether the response is to fix it or to revert to the last committed seed.
 
 The answer is the plan itself, written out in full — the artifact Brett works from on
 sprint day.
