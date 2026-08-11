@@ -181,6 +181,28 @@ subject of later maps, and several are listed under Out of scope below with that
   empty) and [the sprint plan](issues/08-sprint-plan.md), plus one new ticket,
   [Run the seeding pipeline](issues/11-run-seeding-pipeline.md).
 
+- [Design the demo and presentation narrative](issues/10-demo-narrative.md) — **a 7-minute
+  core with two marked optional beats to ~12**, built as one talk so cuts are made by dropping
+  marked sections rather than improvising. The guidelines say *nothing* about the presentation
+  — no slot, no format — and the real number is still unknown. Through-line: **"the domain
+  model is the app"**, hooked by "I built something I'll actually use" and closed on "small on
+  purpose". The six fundamentals are **tiered, not recited**: OOP design, data structures and
+  classes get a full beat anchored to a click; branching, methods and loops get a clause. The
+  **loops gap is real and answered out loud** — the app is LINQ end to end, so the only honest
+  `foreach` lives in the unopened seeder; rather than write a worse loop to satisfy a
+  checklist, Brett says *"LINQ rather than hand-written loops — same iteration, less code to
+  get wrong"*. Code beat is **`GameCollection.Add` on a slide**, never live Visual Studio;
+  the spine is carried by a spoken structural sentence over the running app instead, because
+  no single file shows a relationship *between* classes. The API is reframed from omission to
+  decision — *"no network dependency, not because I couldn't call it but because I did, once,
+  offline"*. Failure plan survives everything: a restart lands on a full app, and the spine's
+  proof is **seeded**, so the live write is a flourish, not a beam; dead clicks get a
+  one-sentence diagnosis and **no pause**. Surfaced a conflict between two settled decisions —
+  the spine's only visible proof sat on **Statistics**, which is **first to cut** — resolved by
+  handing [the sprint plan](issues/08-sprint-plan.md) one build constraint: a **per-row "not
+  owned" badge on the Play Log**, which moves the proof onto the screen where the live write
+  lands and makes step 5 prove the point on save.
+
 ## Not yet specified
 
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.

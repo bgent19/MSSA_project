@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Blocked by: 01, 04, 05, 06, 07, 09 (closed), 10, 11, 12
+Blocked by: 01, 04, 05, 06, 07, 09, 10 (closed), 11, 12
 
 ## Question
 
@@ -44,9 +44,23 @@ do not re-litigate these, sequence them:
 - **Four screens, three of them interactive.** Every screen with a button or form needs
   `@rendermode InteractiveServer`; a missing directive fails silently.
 
-Also now blocked on [Design the demo and presentation narrative](10-demo-narrative.md), which
-may hand back a build constraint — anything the talk track needs that the plan would not
-otherwise produce.
+**Constraints from [Design the demo and presentation narrative](10-demo-narrative.md)** — it
+did hand back a build constraint, plus three items the budget must actually contain:
+
+- **The Play Log needs a per-row "not owned" badge** — a `Dictionary` lookup against the
+  collection and a conditional in the markup. Not cosmetic: the talk's spine ("plays are
+  independent of ownership") currently has its only visible proof on **Statistics**, which is
+  **first on the cut list**, and the failure plan's fallback also needs it. Build it with the
+  Play Log, not after. Statistics keeps the summary count and stays first to cut.
+- **Rehearsal is in the budget, not after it.** The exact six-step path is run once
+  immediately before presenting, on the same machine and display. Reserve the time.
+- **A known-good commit before the demo** is a named commit point, so "revert and rerun" is a
+  real option on stage.
+- **A slide with `GameCollection.Add` on it** is a deliverable — ~5 minutes, the night
+  before, not sprint time. Note it so it does not get forgotten.
+- The talk is planned to a **7-minute core**; the real slot length is still unknown. Two
+  optional beats extend it to ~12, and neither costs build time (the seeder parse loop
+  already exists; the aggregate diagram is a drawing).
 
 **Constraints from [Choose the game data source](05-choose-data-source.md) and
 [Run the seeding pipeline](11-run-seeding-pipeline.md):**
