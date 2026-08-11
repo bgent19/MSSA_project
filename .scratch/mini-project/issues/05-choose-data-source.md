@@ -2,7 +2,8 @@
 
 Type: grilling
 Status: open
-Blocked by: 02, 03 (closed), 09
+Assignee: claude + Brett (wayfinder session, 2026-08-11)
+Blocked by: 02, 03, 09 (all closed — unblocked)
 
 ## Question
 
@@ -60,6 +61,14 @@ leaving that unaddressed.
   runtime failure mode. The survey leans C#; decide it here.
 - **If a real collection import is in play**, note `/collection` is the one endpoint with
   the 202-retry queue, and that its default subtype mislabels expansions.
+
+**Facts added by [Confirm BGG API access is a working token](09-verify-bgg-token.md).**
+Access is real — approved application, bearer token, verified `200`. Username
+**TheGentleBean**, collection **~40 games**. So build-time seeding is live rather than
+hypothetical, and the ~40-game shelf is itself a candidate seed set: real, one API call,
+small enough to hand-curate. This weakens the CSV-dump-of-thousands option, which existed
+mainly to close the unlisted-game gap. The token is not yet stored anywhere; if seeding is
+build-time-only it never needs to reach app configuration at all.
 
 The live-demo failure mode is the thing to weigh most heavily. A dependency that fails in
 front of the class costs more than the feature is worth.

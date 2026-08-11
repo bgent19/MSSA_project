@@ -109,6 +109,17 @@ subject of later maps, and several are listed under Out of scope below with that
   [Prototype the screens and the demo click path](issues/07-prototype-screens.md). Also:
   "Apply Hot Reload on File Save" was unchecked in VS and had to be turned on.
 
+- [Confirm BGG API access is a working token](issues/09-verify-bgg-token.md) — **access is
+  genuine**: an approved application with a bearer token, not merely a BGG user account, so
+  the week-plus approval queue is not in our path. Verified `200` on a live `/thing` call.
+  Username **TheGentleBean**, collection **~40 games**. This makes ticket 03's build-time
+  seeding recommendation live rather than hypothetical, and the real 40-game shelf is itself
+  a strong seed candidate — one `/collection` call, small enough to hand-curate, and
+  genuinely lived-in rather than typed to fill a demo. Correspondingly weakens the
+  CSV-dump-of-thousands route, which existed mainly to close the unlisted-game gap. One
+  loose end: **the token is not stored anywhere yet** — user-secrets or an untracked file,
+  never a commit; and if seeding is build-time-only it need never reach app config at all.
+
 ## Not yet specified
 
 - **The demo and presentation narrative.** There is a graded presentation at the end, and
