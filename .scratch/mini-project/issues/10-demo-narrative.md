@@ -1,7 +1,7 @@
 # Design the demo and presentation narrative
 
 Type: grilling
-Status: open
+Status: claimed (Brett)
 Blocked by: 05, 07 (closed)
 
 ## Question
