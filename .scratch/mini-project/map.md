@@ -109,6 +109,44 @@ subject of later maps, and several are listed under Out of scope below with that
   [Prototype the screens and the demo click path](issues/07-prototype-screens.md). Also:
   "Apply Hot Reload on File Save" was unchecked in VS and had to be turned on.
 
+- [Prototype the screens and the demo click path](issues/07-prototype-screens.md) — **four
+  screens, a populated start, and the collection as the landing page.** Three variants built
+  as throwaway wireframes
+  ([prototypes/screens-prototype.html](prototypes/screens-prototype.html)): collection-first
+  (5 screens), activity-first (4), and one single screen with no routing. Chose the
+  collection-first structure minus its game-detail screen, with the activity-first variant's
+  headline beat folded in: **Collection** (landing), **Log a play**, **Play Log**, all
+  interactive, plus a **static Statistics** screen — each tagged so sprint-day Brett types
+  `@rendermode InteractiveServer` without thinking. The app **starts full** (~18 games, ~40
+  plays) with one deliberate gap filled live on stage, because an empty start burns the first
+  ninety seconds typing and can't show LINQ doing anything — filtering four rows isn't
+  filtering. Hour-one target is Collection + Log a play; cut order is Statistics → Play Log
+  filtering → Play Log; styling is time-boxed and last. The six-step click path ends on the
+  **"played but not owned"** row, making the domain model's most consequential decision
+  visible in ten seconds. Accepted cost: no home for a per-game win rate. Hands seed-must-
+  include-plays and a catalog-wider-than-the-collection to
+  [Choose the game data source](issues/05-choose-data-source.md), the hour-one target and cut
+  order to [Write the hour-by-hour sprint plan](issues/08-sprint-plan.md), and graduates the
+  presentation out of the fog as
+  [Design the demo and presentation narrative](issues/10-demo-narrative.md).
+
+- [Design the storage seam](issues/06-storage-seam.md) — **two interfaces, five members,
+  zero methods**: `IGameCatalogSource { Catalog }` and `IMeepleStore { Collection, PlayLog }`,
+  both `AddSingleton`, both sync. The seam is a **persistence port, not a repository** — it
+  hands over fully-built aggregates and never sees an `OwnedGame`, so the domain model stays
+  the graded artifact. Two findings drive the rest: `AddScoped` in Blazor Server is
+  **per circuit and dies on F5**, which would empty the collection mid-demo, so singleton is
+  both safe *and* correct while there is one user; and because a singleton holds the
+  aggregates in fields, `Collection.Add(x)` has *already* persisted — so `Save` is deleted
+  rather than stubbed, since a no-op you must remember to call fails **invisibly today** and
+  silently in map two. Today's implementation is **in-memory seeded in the constructor** (a
+  mid-demo restart lands on a populated app, and JSON would need a whole DTO layer to get
+  past the private `_games`/`_plays`). Map two touches **two files** —
+  `EfMeepleStore.cs` plus one line of `Program.cs`, with zero component or domain changes —
+  though honestly: EF can't be a singleton, so map two will likely revisit the shape. What
+  the seam protects is the domain model and the components. Graduated fog into
+  [Decide the project and folder structure](issues/12-solution-structure.md).
+
 - [Confirm BGG API access is a working token](issues/09-verify-bgg-token.md) — **access is
   genuine**: an approved application with a bearer token, not merely a BGG user account, so
   the week-plus approval queue is not in our path. Verified `200` on a live `/thing` call.
@@ -141,23 +179,10 @@ subject of later maps, and several are listed under Out of scope below with that
   app configuration. Hands down constraints on
   [Prototype the screens](issues/07-prototype-screens.md) (the app opens populated, not
   empty) and [the sprint plan](issues/08-sprint-plan.md), plus one new ticket,
-  [Run the seeding pipeline](issues/10-run-seeding-pipeline.md).
+  [Run the seeding pipeline](issues/11-run-seeding-pipeline.md).
 
 ## Not yet specified
 
-- **The demo and presentation narrative.** There is a graded presentation at the end, and
-  the story it tells should arguably constrain what gets built. Can't be sharpened until
-  [Prototype the screens and the demo click path](issues/07-prototype-screens.md) settles
-  what the app actually does. Do not let this fall off the map — it is graded.
-- **Repo and solution structure for the long haul.** One project or a class library plus a
-  web project? Matters for the later maps (a domain library is easier to reuse from an
-  Azure Function or a chatbot), costs a little ceremony now. Revisit once
-  [Design the storage seam](issues/06-storage-seam.md) shows how many moving parts there
-  actually are. **Sharpened by [Choose the game data source](issues/05-choose-data-source.md):
-  the solution now has two projects regardless** — the web app and an unreferenced seeder
-  console project — and the seeder needs the domain types, which is precisely the pressure
-  toward extracting a shared class library. Still not ticketable until ticket 06 lands, but
-  the question is now half-answered.
 - **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
   Probably a later map, but worth a deliberate decision rather than a silent omission.
 - **What map two opens with.** Likely auth and EF Core, in some order, but the order

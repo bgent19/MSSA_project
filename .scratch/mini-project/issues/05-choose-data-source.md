@@ -63,6 +63,21 @@ leaving that unaddressed.
 - **If a real collection import is in play**, note `/collection` is the one endpoint with
   the 202-retry queue, and that its default subtype mislabels expansions.
 
+**Constraints added by [Prototype the screens and the demo click path](07-prototype-screens.md).**
+That ticket settled a **populated start** — the app opens full, roughly 18 games and ~40 plays
+across several months, with one deliberate gap filled live on stage. Two consequences land
+directly on this ticket, and the fourth bullet above ("should seed data include plays?") is
+now answered *yes* rather than open:
+
+- **Seed data must include plays, not just games.** ~40 of them, dated across several months
+  so `RecentFirst()` and `MostPlayed()` have something to chew on. Volume is the point:
+  filtering four rows does not read as filtering.
+- **The catalog must contain games that are *not* in the collection.** The demo's strongest
+  beat picks an unowned game in the log form and then shows it on the stats screen as
+  "played but not owned". That makes the unlisted-game gap from
+  [Model the domain](02-domain-model.md) a *demo requirement*, not just a modelling worry —
+  a catalog identical to the collection kills the beat.
+
 **Facts added by [Confirm BGG API access is a working token](09-verify-bgg-token.md).**
 Access is real — approved application, bearer token, verified `200`. Username
 **TheGentleBean**, collection **~40 games**. So build-time seeding is live rather than
@@ -213,7 +228,7 @@ Brett's owned count may come in slightly under 40 as a result. That's fine — t
   state. Both constrain the screen inventory and the demo click path.
 - **[Write the hour-by-hour sprint plan](08-sprint-plan.md)** — seeding must be complete
   before sprint hour 1 or the app has no data, and the solution now has two projects.
-- **[Run the seeding pipeline and commit the seed data](10-run-seeding-pipeline.md)** —
+- **[Run the seeding pipeline and commit the seed data](11-run-seeding-pipeline.md)** —
   created by this ticket. The pipeline above has never been executed end to end.
 - **Token storage** (loose end from ticket 09) is now resolved by implication: seeding is
   build-time only, so the token never reaches app configuration. It lives in the seeder's
