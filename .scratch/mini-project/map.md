@@ -1,0 +1,124 @@
+# Map: Mini Project sprint plan
+
+Label: `wayfinder:map`
+
+## Destination
+
+Every technical decision for the 5-hour MSSA Mini Project is made, written down, and
+understood by Brett — stack, domain model, data source, storage seam, screens, and an
+hour-by-hour plan — so the sprint itself is pure execution with nothing left to decide.
+
+The map is done when Brett could sit down, start the clock, and never once have to stop
+and think about *what* to build or *how* to structure it.
+
+## Notes
+
+**Domain.** A web app that tracks a user's board game collection and lets them log plays of
+those games. Long term (later maps, not this one) it grows AI chatbots for curation and
+rules help, plus a price tracker.
+
+**This is a graded academic deliverable.** MSSA Mini Project: solo, ~5 hours of coding
+effort budgeted (guidelines say 8-12; we plan to 5 as the safe number), ending in a demo
+and presentation. Guidelines live at `MiniProject Guidelines.docx` in the repo root.
+
+**The rubric grades fundamentals, not architecture.** Explicitly: branching, loops,
+methods, classes, OOP design, data structure use. Nothing rewards auth, cloud, or database
+sophistication. Guidelines say "Mock data source strongly suggested. Data Base okay, but
+don't let it interfere with rest of implementation." Every scoping decision on this map
+should ask: *does this put more of Brett's own code on the page?*
+
+**Settled while charting** (constraints for every ticket, not open questions):
+
+- **Framework: Blazor Server** — a .NET 10 Blazor Web App with the `InteractiveServer`
+  render mode. Chosen because Brett has solid OOP and HTML/CSS but no .NET web
+  experience; Blazor Server keeps component state in memory across clicks, so their
+  console-app intuition holds, and there is no JavaScript, no API layer, and no JSON
+  boundary to learn.
+- **No authentication in this sprint.** ASP.NET Identity is mostly scaffolded code that
+  demonstrates none of the six rubric items while consuming a large share of the budget.
+- **No EF Core or real database in this sprint.** Storage goes behind an interface so the
+  swap is cheap later.
+- **.NET 10 SDK** (10.0.302) confirmed installed.
+
+**Coaching contract.** Teach the concept before asking Brett to build. Claude scaffolds
+pure ceremony only — project creation, `.gitignore`, folder structure, config. Brett
+writes every line that demonstrates skill: classes, interfaces, LINQ, components, event
+handlers. Claude explains, reviews, and unblocks; Claude does not write the graded code.
+
+**Skills every session should consult.** `/grilling` and `/domain-modeling` by default.
+`/research` for the AFK research tickets, `/prototype` for the prototype ticket.
+
+**This map is one leg of a longer journey.** The project is meant to be a continual
+learning vehicle. Auth, EF Core, Azure, and the chatbots are not abandoned — they are the
+subject of later maps, and several are listed under Out of scope below with that intent.
+
+## Decisions so far
+
+<!-- one line per closed ticket: the gist, then zoom the link for the detail -->
+
+- [Learn how a Blazor component works](issues/01-learn-blazor-component.md) — yes, and it
+  fits in one sitting: [research/blazor-primer.md](research/blazor-primer.md). A `.razor`
+  file is an ordinary C# class deriving from `ComponentBase`, living in server memory on a
+  SignalR circuit — the console-app intuition holds. Ticket also records three facts the
+  storage seam depends on, chiefly that `AddScoped<T>` is scoped to the *circuit* (one
+  instance per browser tab, dies on refresh), not to an HTTP request.
+
+- [Model the domain: games, collections, and plays](issues/02-domain-model.md) — seven
+  types across three aggregates: **GameCatalog** (the world), **GameCollection** (my
+  shelf), **PlayLog** (my history). Both point into the catalog; neither points at the
+  other — because **plays are independent of ownership** (convention and café plays are
+  frequent, not edge cases). `Play` is permissive: only the game, the date, and the owner's
+  presence are required; scores, winner, duration and location are optional, so `Winner` is
+  an `IsWinner` flag rather than a computation over scores. Three invariants, each on the
+  class that owns the state: no duplicate title (`GameCollection.Add`), no more players
+  than the game seats — upper bound only (`Play`), and every play includes you
+  (`PlayLog.Record`). Hands one gap downstream: a catalog with no ad-hoc creation can't log
+  an unlisted convention title, now a constraint on
+  [Choose the game data source](issues/05-choose-data-source.md).
+
+- [Survey board game data sources](issues/03-survey-data-sources.md) — full findings in
+  [research/board-game-data-sources.md](research/board-game-data-sources.md). **The BGG XML
+  API is no longer anonymous**: since 2025 both v1 and v2 return `401` without a registered
+  application's bearer token (verified live; a bogus token also fails), so every pre-2025
+  tutorial is wrong and the API can't serve as a *fallback* — failure is total. Rate limits
+  are unpublished (throttling shows as 500/503, not 429; 5s between requests is the safe
+  gap), the 202-queue pattern applies only to `/collection`, and `/thing` takes 20 ids per
+  call. Parsing is a **non-issue and a rubric asset**: the whole XML→domain mapping is ~20
+  lines of LINQ-to-XML, no NuGet, verified running on .NET 10 — no client library, since a
+  dependency would take Brett's code off the page. No free unauthenticated alternative
+  exists in 2026 (Board Game Atlas and bgg-json both dead). **Key conclusion:** the API's
+  value is at *build time*, not run time — seed once offline with the token, commit the
+  result, demo with zero network dependency. Hands two things downstream: that
+  recommendation plus a CSV-dump route to a catalog of thousands, both now constraints on
+  [Choose the game data source](issues/05-choose-data-source.md); and a fact to nail down,
+  [Confirm BGG API access is a working token](issues/09-verify-bgg-token.md).
+
+## Not yet specified
+
+- **The demo and presentation narrative.** There is a graded presentation at the end, and
+  the story it tells should arguably constrain what gets built. Can't be sharpened until
+  [Prototype the screens and the demo click path](issues/07-prototype-screens.md) settles
+  what the app actually does. Do not let this fall off the map — it is graded.
+- **Repo and solution structure for the long haul.** One project or a class library plus a
+  web project? Matters for the later maps (a domain library is easier to reuse from an
+  Azure Function or a chatbot), costs a little ceremony now. Revisit once
+  [Design the storage seam](issues/06-storage-seam.md) shows how many moving parts there
+  actually are.
+- **Testing.** Whether any automated tests belong in a 5-hour sprint, and if so what kind.
+  Probably a later map, but worth a deliberate decision rather than a silent omission.
+- **What map two opens with.** Likely auth and EF Core, in some order, but the order
+  depends on what the sprint actually produces.
+
+## Out of scope
+
+Ruled beyond *this* destination. These return as later maps, not as tickets here.
+
+- **Authentication and user accounts** — high cost, near-zero rubric value, guidelines
+  don't ask for it. First candidate for map two.
+- **EF Core and a real database** — deferred behind the storage seam. Map two.
+- **Azure hosting and services** — the app must not *preclude* Azure, but nothing gets
+  deployed in this sprint.
+- **The AI chatbots** (curator, rules helper) and the **price tracker** — the reason the
+  project keeps going, and entirely outside a 5-hour fundamentals showcase.
+- **Blazor WebAssembly, MVC, Razor Pages** — considered and rejected as the framework for
+  this sprint; revisiting them is a new effort, not a step on this route.
