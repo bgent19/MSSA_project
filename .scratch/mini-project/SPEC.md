@@ -1,6 +1,9 @@
 # Spec: MeepleLedger
 
-Triage label: `ready-for-agent` — **see [A note on the label](#a-note-on-the-label-and-the-tracker) before acting on it.**
+Triage label: `ready-for-brett` — **see [A note on the label](#a-note-on-the-label-and-the-tracker).**
+
+Broken into 23 build tickets at
+[`meepleledger-build/issues/`](../meepleledger-build/issues/README.md).
 
 Synthesized from [the completed map](map.md) and its twelve closed tickets. This document
 re-decides nothing; it consolidates. Where a decision has an argument behind it, the ticket is
@@ -575,7 +578,8 @@ carries only the nine default labels — `ready-for-agent` does not exist. The t
 actually uses is the wayfinder convention in `.scratch/mini-project/issues/`, which is where this
 spec is filed. If a GitHub issue is wanted instead, the label needs creating first.
 
-**2. `ready-for-agent` conflicts with the standing coaching contract.** The map states it plainly:
+**2. The label is `ready-for-brett`, not `ready-for-agent`** — Brett's call, and it resolves a real
+conflict with the standing coaching contract. The map states the contract plainly:
 *Claude scaffolds pure ceremony only — project creation, `.gitignore`, folder structure, config.
 Brett writes every line that demonstrates skill: classes, interfaces, LINQ, components, event
 handlers.* This is a **graded academic deliverable**, and the domain model is both the graded
