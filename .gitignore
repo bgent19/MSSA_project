@@ -481,8 +481,10 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
-.claude
-.scratch
-data
-issues
+# Local agent, scratch, and working files (not part of the deliverable)
+/.claude/
+/.scratch/
+/.vs/
+/data/
+/issues/
 
