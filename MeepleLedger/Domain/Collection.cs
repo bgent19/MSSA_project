@@ -1,42 +1,37 @@
-﻿namespace MeepleLedger.Domain
+﻿using Microsoft.AspNetCore.Components.Forms;
+
+namespace MeepleLedger.Domain
 {
     public class GameCatalog
     {
-        private IReadOnlyList<Game> Games { get; set; }
+        private IReadOnlyList<Game> Games { get; }
 
-        public IEnumerable<Game> Search(SearchType t, string name)
+        public IEnumerable<Game> Search(string term)
         {
-            if(t == SearchType.Title)
-            {
-                return Games.Where(g => g.Name == name);
-            }
-            else
-            {
-                return Games.Where(g => g.Designer == name);
-            }
+            term = string.Concat(term.Where(c => !char.IsWhiteSpace(c))).ToLower();
+
+            return null;
         }
 
-        public GameCatalog ByPlayerCount(int n)
+        public IEnumerable<Game> ByPlayerCount(int n)
         {
-           return new GameCatalog { Games = (IReadOnlyList<Game>)
-                                            this.Games.Where(g => (g.MinPlayers <= n) &&
-                                                                  (g.MaxPlayers >= n)) };
+           return Games.Where(g => (g.MinPlayers <= n) && (g.MaxPlayers >= n));
         }
     }
 
     public class GameCollection
     {
-        private Dictionary<string, OwnedGame> _games { get; set; } // Key is game title
-        public int TotalGames { get; private set; }
+        private Dictionary<string, OwnedGame> _games; // Key is game title
+        public int TotalGames => _games.Count();
 
         public void Add(OwnedGame game)
         {
-            if(!_games.TryAdd(game.Game.Name, game))
+            if(_games.ContainsKey(game.Game.Name))
             {
                 throw new InvalidOperationException("Title is already owned.");
             }
 
-            TotalGames++;
+            _games.Add(game.Game.Name, game);
         }
 
         public void Remove(string name)
@@ -45,36 +40,20 @@
             {
                 throw new InvalidOperationException("Title not found in collection.");
             }
-
-            TotalGames--;
         }
 
-        public IEnumerable<KeyValuePair<string,OwnedGame>> Search(SearchType t, string name)
+        public IEnumerable<OwnedGame> Search(string term)
         {
-            if (t == SearchType.Title)
-            {
-                return _games.Where(g => g.Value.Game.Name == name);
-            }
-            else
-            {
-                return _games.Where(g => g.Value.Game.Designer == name);
-            }
+            term = string.Concat(term.Where(c => !char.IsWhiteSpace(c))).ToLower();
+
+            return null;
         }
 
-        public GameCollection FilterByPlayercount(int n)
+        public IEnumerable<OwnedGame> FilterByPlayerCount(int n)
         {
-            return new GameCollection()
-            {
-                _games = (Dictionary<string,OwnedGame>)
-                         _games.Where((g) => ((g.Value.Game.MinPlayers <= n) &&
-                                              (g.Value.Game.MaxPlayers >= n)))
-            };
+            return _games.Where((g) => ((g.Value.Game.MinPlayers <= n) && (g.Value.Game.MaxPlayers >= n)))
+                         .Select(v => v.Value);
         }
     }
 
-    public enum SearchType
-    {
-        Title,
-        Desinger,
-    }
 }
