@@ -2,18 +2,19 @@
 {
     public class Game
     {
-        public required string Name;
-        int MinPlayers;
-        int MaxPlayers;
-        int PlayTimeMinutes;
+        public required string Name { get; set; }
+        public string? Designer { get; set; }
+        public int MinPlayers { get; set; }
+        public int MaxPlayers { get; set; }
+        public int PlaytimeMinutes { get; set; }
     }
 
     public class OwnedGame
     {
-        public required Game Game;
-        public DateTime DateAcquired;
-        public Condition Condition;
-        public string Notes;
+        public required Game Game { get; set; }
+        public DateTime DateAcquired { get; set; }
+        public Condition Condition { get; set; }
+        public string? Notes { get; set; }
     }
 
     public enum Condition
