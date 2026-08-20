@@ -7,6 +7,12 @@
         public int MinPlayers { get; set; }
         public int MaxPlayers { get; set; }
         public int PlaytimeMinutes { get; set; }
+
+        public bool Search(string term)
+        {
+            return Name.Contains(term, StringComparison.OrdinalIgnoreCase)
+             || (Designer?.Contains(term, StringComparison.OrdinalIgnoreCase) == true);
+        }
     }
 
     public class OwnedGame
