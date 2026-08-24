@@ -1,20 +1,17 @@
-﻿using Microsoft.AspNetCore.Components.Routing;
-using System.Globalization;
-
-namespace MeepleLedger.Domain
+﻿namespace MeepleLedger.Domain
 {
     public class Play
     {
-        public required Game Game;
-        public required DateTime PlayedOn;
-        public int? DurationMinutes;
-        public string? Location;
-        public required List<PlayerResult> Results;
+        public Game Game { get; set; }
+        public DateTime PlayedOn { get; set; }
+        public int? DurationMinutes { get; set; }
+        public string? Location { get; set; }
+        public List<PlayerResult> Results { get; set; }
 
-        IEnumerable<PlayerResult> Winners => Results.Where(r => r.IsWinner);
-        public bool? HasWinner => Winners.Any();
+        public IEnumerable<PlayerResult> Winners => Results.Where(r => r.IsWinner);
+        public bool HasWinner => Winners.Any();
 
-        public Play(Game g, DateTime d, List<PlayerResult> r, int min = 0, string l = "")
+        public Play(Game g, DateTime d, List<PlayerResult> r, int? min = null, string? l = null)
         {
             Game = g;
             PlayedOn = d;

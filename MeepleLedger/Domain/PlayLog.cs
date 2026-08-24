@@ -1,10 +1,8 @@
-﻿using Microsoft.AspNetCore.Identity;
-
-namespace MeepleLedger.Domain
+﻿namespace MeepleLedger.Domain
 {
     public class PlayLog
     {
-        public required string OwnerName;
+        public required string OwnerName { get; set; }
         private readonly List<Play> _plays = [];
 
         public void Record(Play p)
@@ -14,7 +12,7 @@ namespace MeepleLedger.Domain
                 throw new InvalidOperationException("You must be recorded in a game you wish to log.");
             }
 
-            _plays.Append(p);
+            _plays.Add(p);
         }
 
         public IEnumerable<Play> ForGame(Game g)
@@ -22,14 +20,14 @@ namespace MeepleLedger.Domain
             return _plays.Where(p => p.Game == g);
         }
 
-        public void RecentFirst()
+        public IEnumerable<Play> RecentFirst()
         {
-            _plays.OrderBy(static p => p.PlayedOn);
+            return _plays.OrderByDescending(static p => p.PlayedOn);
         }
 
-        public void MostPlayed()
+        public IEnumerable<Game> MostPlayed()
         {
-            _plays.GroupBy(p => p.Game).OrderByDescending(g => g.Count()).Select(g => g.Key).ToList();
+            return _plays.GroupBy(p => p.Game).OrderByDescending(g => g.Count()).Select(g => g.Key);
         }
     }
 }
