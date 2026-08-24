@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>*,*::before,*::after{box-sizing:border-box}*{margin:0}</style>
+<title>GameCollection.Add</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* A projected slide: one deliberate light-ground theme, high contrast,
+     so it survives a washed-out classroom projector. No theme switching. */
+  :root {
+    --ground:  #F1F3F0;
+    --panel:   #FDFDFC;
+    --edge:    #D5DCD6;
+    --ink:     #14201C;
+    --muted:   #6B7A73;
+    --accent:  #0B5B49;
+    --keyword: #0B5B49;
+    --type:    #2C5578;
+    --string:  #A4462B;
+    --comment: #7C8A83;
+    --guard:   #E8EDE7;
+
+    /* One unit: 1% of the width of a 16:9 stage fitted to the display. */
+    --u: min(1vw, 1.7778vh);
+  }
+
+  html, body {
+    height: 100%;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .stage {
+    width: calc(100 * var(--u));
+    height: calc(56.25 * var(--u));
+    background: var(--ground);
+    padding: calc(5 * var(--u)) calc(6 * var(--u));
+    display: flex;
+    flex-direction: column;
+    gap: calc(2.6 * var(--u));
+  }
+
+  .title {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 600;
+    font-size: calc(4.6 * var(--u));
+    line-height: 1;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .title .dot,
+  .title .member {
+    color: var(--accent);
+  }
+
+  .code {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: calc(0.5 * var(--u));
+    padding: calc(2.6 * var(--u)) calc(3 * var(--u));
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0;
+    overflow-x: auto;
+  }
+
+  .line {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(2.15 * var(--u));
+    line-height: 1.62;
+    white-space: pre;
+    display: flex;
+    align-items: baseline;
+    padding: 0 calc(1 * var(--u));
+    margin: 0 calc(-1 * var(--u));
+  }
+
+  /* The guard clause reads as one block, not three loose lines. */
+  .line.marked {
+    background: var(--guard);
+  }
+
+  .line.marked.first  { border-radius: calc(0.4 * var(--u)) calc(0.4 * var(--u)) 0 0; }
+  .line.marked.last   { border-radius: 0 0 calc(0.4 * var(--u)) calc(0.4 * var(--u)); }
+
+  .label {
+    margin-left: auto;
+    padding-left: calc(3 * var(--u));
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: calc(1.35 * var(--u));
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+
+  .k { color: var(--keyword); font-weight: 500; }
+  .t { color: var(--type); }
+  .s { color: var(--string); }
+  .c { color: var(--comment); font-style: italic; }
+
+  .claim {
+    font-size: calc(2.05 * var(--u));
+    line-height: 1.35;
+    color: var(--muted);
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .claim strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+</style>
+
+</head>
+<body>
+<div class="stage">
+  <h1 class="title">GameCollection<span class="dot">.</span><span class="member">Add</span></h1>
+
+  <div class="code">
+    <div class="line"><span class="k">public class</span> <span class="t">GameCollection</span></div>
+    <div class="line">{</div>
+    <div class="line">    <span class="k">private readonly</span> <span class="t">Dictionary</span>&lt;<span class="k">string</span>, <span class="t">OwnedGame</span>&gt; _games = []; <span class="c">// Key is game title</span><span class="label">Data structure</span></div>
+    <div class="line"> </div>
+    <div class="line">    <span class="k">public void</span> <span class="t">Add</span>(<span class="t">OwnedGame</span> game)</div>
+    <div class="line">    {</div>
+    <div class="line marked first">        <span class="k">if</span> (_games.ContainsKey(game.Game.Name))<span class="label">Branching</span></div>
+    <div class="line marked">        {</div>
+    <div class="line marked">            <span class="k">throw new</span> <span class="t">InvalidOperationException</span>(<span class="s">"Title is already owned."</span>);</div>
+    <div class="line marked last">        }</div>
+    <div class="line"> </div>
+    <div class="line">        _games.Add(game.Game.Name, game);</div>
+    <div class="line">    }</div>
+    <div class="line"> </div>
+    <div class="line">    <span class="c">// Remove, Search, FilterByPlayerCount …</span></div>
+    <div class="line">}</div>
+  </div>
+
+  <p class="claim">A title can be on the shelf <strong>once</strong> — and because the shelf is a dictionary keyed by title, enforcing that costs <strong>one lookup</strong>, not a scan.</p>
+</div>
+</body>
+</html>
