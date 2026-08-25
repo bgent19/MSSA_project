@@ -2,6 +2,7 @@
 using System.ComponentModel.DataAnnotations;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.Serialization;
 using System.Xml.Linq;
 
 // Set working directory to solution root
@@ -11,6 +12,12 @@ while (currentDir.Name != "MSSA_project" && currentDir.Parent != null)
     currentDir = currentDir.Parent;
 }
 Environment.CurrentDirectory = currentDir.FullName;
+
+if(args.FirstOrDefault() == "emit")
+{
+    emit();
+    return 0;
+}
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
 string? token = Environment.GetEnvironmentVariable("BGG_TOKEN");
@@ -187,3 +194,15 @@ Console.WriteLine();
 Console.WriteLine($"Done. Raw XML is in the '{outputDir}' folder.");
 
 return 0;
+
+
+void emit()
+{
+    // Output file
+    string fileName = "MeepleLedger/Data/CatalogSeed.cs";
+
+
+
+    File.WriteAllText(fileName, "TEST");
+    Console.WriteLine("Did the emit branch");
+}
