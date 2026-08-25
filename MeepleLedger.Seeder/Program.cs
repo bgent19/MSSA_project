@@ -98,6 +98,13 @@ foreach (var line in lines.Skip(1))
         continue;
     }
 
+    // unranked games have rank 0
+    // they need to be removed or else they will be the top of sorted order later
+    if(rank <= 0)
+    {
+        continue;
+    }
+
     // Add game to list if all od these checks pass
     rankdIds.Add((id, rank));
 }
