@@ -177,7 +177,7 @@ for(int i = 0; i < batchCount; i++)
     if((int)response.StatusCode >= 500)
     {
         Console.WriteLine($"Got a {(int)response.StatusCode}. That means you went too fast.");
-        Console.WriteLine("Wait a few minutes and run again - saved batches are skipped.");
+        Console.WriteLine("Wait a few minutes and run again. Saved batches are skipped.");
         return 1;
     }
 
@@ -484,7 +484,7 @@ static void EmitLog()
                 isWinner = seat == winnerSeat;
             }
 
-            // Some results are just a name - real play logging is lossy
+            // Some results are just a name. Testing nullability of certain fields
             int? score = null;
             if (!noScore.Contains(name) && random.Next(0, 10) < 7)
             {
@@ -517,12 +517,12 @@ static void EmitLog()
     {
         if (!maxPlayers.ContainsKey(play.Name))
         {
-            throw new Exception($"'{play.Name}' is not in the catalog - Find() would throw.");
+            throw new Exception($"'{play.Name}' is not in the catalog. Find() would throw.");
         }
 
         if (!play.Results.Any(r => r.PlayerName == owner))
         {
-            throw new Exception($"A play of '{play.Name}' is missing {owner} - PlayLog.Record would throw.");
+            throw new Exception($"A play of '{play.Name}' is missing {owner}. PlayLog.Record would throw.");
         }
 
         if (play.Results.Count > maxPlayers[play.Name])
