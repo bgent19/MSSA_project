@@ -1,8 +1,6 @@
 ﻿
-using System.ComponentModel.DataAnnotations;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Runtime.Serialization;
 using System.Xml.Linq;
 
 // Set working directory to solution root
@@ -223,8 +221,6 @@ static void emit()
     int dropped = 0;
     int parsed = 0;
 
-    Console.WriteLine(files[0]);
-
     foreach (var file in files)
     {
         var items = XDocument.Load(file).Root!.Elements("item");
@@ -239,7 +235,7 @@ static void emit()
 
             string designer = item.Elements("link")
                                   .FirstOrDefault(l => (string?)l.Attribute("type") == "boardgamedesigner")?
-                                  .Attribute("value")?.Value ?? "Unkown";
+                                  .Attribute("value")?.Value ?? "Unknown";
 
             int minPlayers = int.Parse(item.Element("minplayers")!.Attribute("value")!.Value);
 
@@ -254,8 +250,8 @@ static void emit()
             int playtimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value);
 
             File.AppendAllText(fileName, "        " +
-                                        $"new Game {{ Name = \"{name}\", " +
-                                        $"Designer = \"{designer}\", " +
+                                        $"new Game {{ Name = {Quote(name)}, " +
+                                        $"Designer = {Quote(designer)}, " +
                                         $"MinPlayers = {minPlayers}, " +
                                         $"MaxPlayers = {maxPlayers}, " +
                                         $"PlaytimeMinutes = {playtimeMinutes} }},\n");
@@ -273,3 +269,5 @@ static void emit()
     Console.WriteLine($"dropped {dropped} (maxplayers < 1)");
     Console.WriteLine($"wrote MeepleLedger/Data/CatalogSeed.cs ({parsed - dropped} games)");
 }
+
+static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
