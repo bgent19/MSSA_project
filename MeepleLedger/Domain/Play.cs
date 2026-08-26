@@ -11,7 +11,7 @@
         public IEnumerable<PlayerResult> Winners => Results.Where(r => r.IsWinner);
         public bool HasWinner => Winners.Any();
 
-        public Play(Game g, DateTime d, List<PlayerResult> r, int? min = null, string? l = null)
+        public Play(Game g, DateTime d, List<PlayerResult> r, int? durationMinutes = null, string? location = null)
         {
             Game = g;
             PlayedOn = d;
@@ -22,8 +22,8 @@
                 throw new ArgumentOutOfRangeException("Results", "Results cannot exceed max players for a game.");
             }
 
-            DurationMinutes = min;
-            Location = l;
+            DurationMinutes = durationMinutes;
+            Location = location;
         }
 
     }
