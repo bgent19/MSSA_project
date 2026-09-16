@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>*,*::before,*::after{box-sizing:border-box}*{margin:0}</style>
+<title>MeepleLedger — Domain &amp; Seeder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* A projected deck: one deliberate light-ground theme, high contrast, so it
+     survives a washed-out classroom projector. No theme switching.
+     Same token set as code-beat-slide.html — slide 6 is that slide. */
+  :root {
+    --ground:  #F1F3F0;
+    --panel:   #FDFDFC;
+    --sunk:    #E8EDE7;
+    --edge:    #D5DCD6;
+    --ink:     #14201C;
+    --muted:   #6B7A73;
+    --accent:  #0B5B49;
+    --keyword: #0B5B49;
+    --type:    #2C5578;
+    --string:  #A4462B;
+    --comment: #7C8A83;
+    --raw:     #A4462B;
+
+    /* One unit: 1% of the width of a 16:9 stage fitted to the display. */
+    --u: min(1vw, 1.7778vh);
+  }
+
+  html, body { height: 100%; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .deck { position: relative; width: calc(100 * var(--u)); height: calc(56.25 * var(--u)); }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    background: var(--ground);
+    padding: calc(4.6 * var(--u)) calc(6 * var(--u)) calc(5.4 * var(--u));
+    display: none;
+    flex-direction: column;
+    gap: calc(2.2 * var(--u));
+  }
+  .slide.on { display: flex; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .slide.on { animation: rise 240ms ease-out both; }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(calc(0.7 * var(--u))); }
+      to   { opacity: 1; transform: none; }
+    }
+  }
+
+  /* ---- type ---- */
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.35 * var(--u));
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1.title, h2.title {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 600;
+    font-size: calc(4.4 * var(--u));
+    line-height: 1.02;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h2.title.sm { font-size: calc(3.5 * var(--u)); }
+  .title .dot, .title .member, .title em { color: var(--accent); font-style: normal; }
+
+  .lede {
+    font-size: calc(2.05 * var(--u));
+    line-height: 1.42;
+    color: var(--muted);
+    max-width: calc(72 * var(--u));
+    text-wrap: pretty;
+    margin: 0;
+  }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  .claim {
+    font-size: calc(2 * var(--u));
+    line-height: 1.36;
+    color: var(--muted);
+    text-wrap: balance;
+    margin: 0;
+    padding-top: calc(0.4 * var(--u));
+  }
+  .claim strong { color: var(--ink); font-weight: 600; }
+
+  .fill { flex: 1; min-height: 0; }
+
+  /* ---- code panel, matching the code-beat slide ---- */
+  .code {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: calc(0.5 * var(--u));
+    padding: calc(2 * var(--u)) calc(2.6 * var(--u));
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    overflow-x: auto;
+  }
+  .line {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.72 * var(--u));
+    line-height: 1.6;
+    white-space: pre;
+    display: flex;
+    align-items: baseline;
+    padding: 0 calc(1 * var(--u));
+    margin: 0 calc(-1 * var(--u));
+  }
+  .line.marked { background: var(--sunk); }
+  .line.marked.first { border-radius: calc(0.4 * var(--u)) calc(0.4 * var(--u)) 0 0; }
+  .line.marked.last  { border-radius: 0 0 calc(0.4 * var(--u)) calc(0.4 * var(--u)); }
+  .label {
+    margin-left: auto;
+    padding-left: calc(3 * var(--u));
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: calc(1.2 * var(--u));
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .k { color: var(--keyword); font-weight: 500; }
+  .t { color: var(--type); }
+  .s { color: var(--string); }
+  .c { color: var(--comment); font-style: italic; }
+
+  /* ---- layout blocks ---- */
+  .cols { display: grid; gap: calc(2 * var(--u)); }
+  .cols.two   { grid-template-columns: 1fr 1fr; }
+  .cols.three { grid-template-columns: repeat(3, 1fr); }
+  .cols.lean  { grid-template-columns: 1.15fr 1fr; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: calc(0.5 * var(--u));
+    padding: calc(1.8 * var(--u)) calc(2 * var(--u));
+    display: flex;
+    flex-direction: column;
+    gap: calc(0.75 * var(--u));
+  }
+  .card h3 {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.75 * var(--u));
+    font-weight: 600;
+    color: var(--type);
+    margin: 0;
+  }
+  .card p { font-size: calc(1.55 * var(--u)); line-height: 1.45; color: var(--muted); margin: 0; }
+  .card p strong { color: var(--ink); font-weight: 600; }
+  .card.quiet { background: transparent; border-style: dashed; }
+
+  ul.points { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: calc(1.1 * var(--u)); }
+  ul.points li {
+    font-size: calc(1.78 * var(--u));
+    line-height: 1.42;
+    padding-left: calc(2.4 * var(--u));
+    position: relative;
+    color: var(--ink);
+    text-wrap: pretty;
+  }
+  ul.points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: calc(0.75 * var(--u));
+    width: calc(0.9 * var(--u));
+    height: calc(0.9 * var(--u));
+    background: var(--accent);
+    border-radius: 1px;
+    transform: rotate(45deg);
+  }
+  ul.points li span { color: var(--muted); }
+
+  table.grid {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: calc(1.55 * var(--u));
+  }
+  table.grid th, table.grid td {
+    text-align: left;
+    padding: calc(1 * var(--u)) calc(1.2 * var(--u));
+    border-bottom: 1px solid var(--edge);
+    vertical-align: top;
+    line-height: 1.4;
+  }
+  table.grid th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.2 * var(--u));
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom-color: var(--ink);
+  }
+  table.grid td.verdict { font-weight: 600; color: var(--muted); white-space: nowrap; }
+  table.grid tr.win td { color: var(--ink); }
+  table.grid tr.win td.verdict { color: var(--accent); }
+  table.grid tr.win td:first-child { font-weight: 600; }
+
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: calc(1.6 * var(--u)); align-content: center; }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: calc(0.5 * var(--u));
+    padding: calc(1.8 * var(--u)) calc(1.6 * var(--u));
+    display: flex;
+    flex-direction: column;
+    gap: calc(0.5 * var(--u));
+  }
+  .stat b {
+    font-family: "Fraunces", Georgia, serif;
+    font-size: calc(4.4 * var(--u));
+    font-weight: 600;
+    line-height: 0.95;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span { font-size: calc(1.38 * var(--u)); line-height: 1.35; color: var(--muted); }
+
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .chip {
+    display: inline-block;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.28 * var(--u));
+    font-weight: 500;
+    padding: calc(0.3 * var(--u)) calc(0.8 * var(--u));
+    border: 1px solid var(--edge);
+    border-radius: calc(0.3 * var(--u));
+    background: var(--sunk);
+    color: var(--accent);
+  }
+  .chip.raw { color: var(--raw); }
+
+  /* ---- title slide ---- */
+  .slide.cover { justify-content: center; gap: calc(2.6 * var(--u)); }
+  .cover h1.title { font-size: calc(7.2 * var(--u)); }
+  .cover .rule { width: calc(14 * var(--u)); height: calc(0.4 * var(--u)); background: var(--accent); }
+  .byline {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.45 * var(--u));
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+
+  /* ---- chrome ---- */
+  .chrome {
+    position: absolute;
+    left: calc(6 * var(--u));
+    right: calc(6 * var(--u));
+    bottom: calc(2.2 * var(--u));
+    display: flex;
+    align-items: center;
+    gap: calc(1.6 * var(--u));
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: calc(1.2 * var(--u));
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  .chrome .track { flex: 1; height: 2px; background: var(--edge); position: relative; }
+  .chrome .track i { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+  @media (prefers-reduced-motion: no-preference) {
+    .chrome .track i { transition: width 240ms ease-out; }
+  }
+  .chrome .num { font-variant-numeric: tabular-nums; }
+
+  .nav { position: absolute; inset: 0; display: flex; border: 0; }
+  .nav button { flex: 1; background: none; border: 0; cursor: pointer; padding: 0; }
+  .nav button:focus-visible { outline: calc(0.3 * var(--u)) solid var(--accent); outline-offset: calc(-1 * var(--u)); }
+  .slide > *:not(.nav) { position: relative; z-index: 1; }
+
+  /* diagram */
+  svg.map { width: 100%; height: 100%; display: block; }
+  svg.map text { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+</style>
+
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- 1 -->
+  <section class="slide cover on">
+    <p class="eyebrow">MSSA capstone &middot; mini-project</p>
+    <h1 class="title">Meeple<span class="member">Ledger</span></h1>
+    <div class="rule"></div>
+    <p class="lede">A domain model for a board game shelf &mdash; and the build-time machine that fills it with two hundred real games without the app ever opening a socket.</p>
+    <p class="byline">Brett Gentile &middot; Domain &amp; Seeder</p>
+  </section>
+
+  <!-- 2 -->
+  <section class="slide">
+    <p class="eyebrow">What it is</p>
+    <h2 class="title">Two questions, one ledger</h2>
+    <div class="cols two fill">
+      <div class="card">
+        <h3>What's on the shelf?</h3>
+        <p>Twenty-eight owned games. Searchable by title or designer, filterable by "who's here tonight."</p>
+        <p><strong>The collection</strong> &mdash; a set of physical copies I own.</p>
+      </div>
+      <div class="card">
+        <h3>What did we play?</h3>
+        <p>Seventy-eight plays over twelve months. Who was at the table, what they scored, who won, where.</p>
+        <p><strong>The play log</strong> &mdash; a history of evenings.</p>
+      </div>
+    </div>
+    <p class="claim">The interesting part is that these two are <strong>not the same list</strong>. You play games you don't own, and you own games you've never played. The model has to say that out loud.</p>
+  </section>
+
+  <!-- 3 -->
+  <section class="slide">
+    <p class="eyebrow">The domain</p>
+    <h2 class="title sm">Six types, two clusters</h2>
+    <div class="fill">
+      <svg class="map" viewBox="0 0 1000 400" role="img" aria-label="MeepleLedger domain model: Game and OwnedGame feed GameCatalog and GameCollection; Play and PlayerResult feed PlayLog; Play references Game.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#6B7A73"></path>
+          </marker>
+        </defs>
+
+        <rect x="18" y="18" width="470" height="364" rx="6" fill="#E8EDE7" stroke="#D5DCD6"></rect>
+        <text x="42" y="48" font-size="15" fill="#6B7A73" letter-spacing="2">WHAT I OWN</text>
+
+        <rect x="512" y="18" width="470" height="364" rx="6" fill="#E8EDE7" stroke="#D5DCD6"></rect>
+        <text x="536" y="48" font-size="15" fill="#6B7A73" letter-spacing="2">WHAT WE PLAYED</text>
+
+        <rect x="52" y="80" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#0B5B49" stroke-width="2"></rect>
+        <text x="142" y="110" font-size="20" fill="#14201C" text-anchor="middle">Game</text>
+        <text x="142" y="130" font-size="13" fill="#7C8A83" text-anchor="middle">name, designer, seats</text>
+
+        <rect x="276" y="80" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="366" y="110" font-size="20" fill="#14201C" text-anchor="middle">OwnedGame</text>
+        <text x="366" y="130" font-size="13" fill="#7C8A83" text-anchor="middle">+ acquired, condition</text>
+
+        <rect x="52" y="248" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="142" y="278" font-size="20" fill="#14201C" text-anchor="middle">GameCatalog</text>
+        <text x="142" y="298" font-size="13" fill="#7C8A83" text-anchor="middle">200 &mdash; read-only</text>
+
+        <rect x="276" y="248" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="366" y="278" font-size="20" fill="#14201C" text-anchor="middle">GameCollection</text>
+        <text x="366" y="298" font-size="13" fill="#7C8A83" text-anchor="middle">28 &mdash; keyed by title</text>
+
+        <rect x="546" y="80" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="636" y="110" font-size="20" fill="#14201C" text-anchor="middle">PlayerResult</text>
+        <text x="636" y="130" font-size="13" fill="#7C8A83" text-anchor="middle">name, score?, won</text>
+
+        <rect x="770" y="80" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="860" y="110" font-size="20" fill="#14201C" text-anchor="middle">Play</text>
+        <text x="860" y="130" font-size="13" fill="#7C8A83" text-anchor="middle">one evening</text>
+
+        <rect x="658" y="248" width="180" height="62" rx="4" fill="#FDFDFC" stroke="#D5DCD6"></rect>
+        <text x="748" y="278" font-size="20" fill="#14201C" text-anchor="middle">PlayLog</text>
+        <text x="748" y="298" font-size="13" fill="#7C8A83" text-anchor="middle">78 &mdash; owner's history</text>
+
+        <line x1="232" y1="111" x2="270" y2="111" stroke="#6B7A73" stroke-width="1.5" marker-end="url(#ar)"></line>
+        <line x1="142" y1="142" x2="142" y2="242" stroke="#6B7A73" stroke-width="1.5" marker-end="url(#ar)"></line>
+        <line x1="366" y1="142" x2="366" y2="242" stroke="#6B7A73" stroke-width="1.5" marker-end="url(#ar)"></line>
+        <line x1="726" y1="111" x2="764" y2="111" stroke="#6B7A73" stroke-width="1.5" marker-end="url(#ar)"></line>
+        <line x1="860" y1="142" x2="860" y2="279" stroke="#6B7A73" stroke-width="1.5"></line>
+        <line x1="860" y1="279" x2="844" y2="279" stroke="#6B7A73" stroke-width="1.5" marker-end="url(#ar)"></line>
+
+        <path d="M 142 80 L 142 60 L 860 60 L 860 74" fill="none" stroke="#0B5B49" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ar)"></path>
+        <rect x="424" y="44" width="152" height="26" rx="4" fill="#F1F3F0"></rect>
+        <text x="500" y="63" font-size="14" fill="#0B5B49" text-anchor="middle" letter-spacing="1">a play needs a Game</text>
+      </svg>
+    </div>
+    <p class="claim">A <strong>Play</strong> points straight at a <strong>Game</strong> in the catalog &mdash; not at an <span class="mono">OwnedGame</span>. That single arrow is the design decision the whole app is built on.</p>
+  </section>
+
+  <!-- 4 -->
+  <section class="slide">
+    <p class="eyebrow">Domain &middot; 1 of 4</p>
+    <h2 class="title">Game <em>vs.</em> OwnedGame</h2>
+    <div class="cols lean fill">
+      <div class="code">
+        <div class="line"><span class="k">public class</span> <span class="t">Game</span></div>
+        <div class="line">{</div>
+        <div class="line">    <span class="k">public required string</span> Name { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public string</span>? Designer { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public int</span> MinPlayers { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public int</span> MaxPlayers { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public int</span> PlaytimeMinutes { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">}</div>
+        <div class="line"> </div>
+        <div class="line"><span class="k">public class</span> <span class="t">OwnedGame</span></div>
+        <div class="line">{</div>
+        <div class="line marked first">    <span class="k">public required</span> <span class="t">Game</span> Game { <span class="k">get</span>; <span class="k">set</span>; }<span class="label">Has-a</span></div>
+        <div class="line marked last"> </div>
+        <div class="line">    <span class="k">public</span> <span class="t">DateTime</span> DateAcquired { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public</span> <span class="t">Condition</span> Condition { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">    <span class="k">public string</span>? Notes { <span class="k">get</span>; <span class="k">set</span>; }</div>
+        <div class="line">}</div>
+      </div>
+      <div class="cols" style="grid-template-columns: 1fr;">
+        <div class="card">
+          <h3>Why two types</h3>
+          <p><strong>Game</strong> is the title as the world knows it. Wingspan is Wingspan whether or not it's on my shelf.</p>
+          <p><strong>OwnedGame</strong> is <em>my copy</em> &mdash; when I got it, what shape it's in.</p>
+        </div>
+        <div class="card">
+          <h3>Composition, not inheritance</h3>
+          <p><span class="mono">OwnedGame</span> <strong>has a</strong> Game; it isn't one. Owning is a relationship I have with a title, not a kind of title.</p>
+        </div>
+        <div class="card quiet">
+          <h3>Five properties. Deliberately.</h3>
+          <p>BGG hands back year, artwork, weight, categories, description. All discarded. An unused property is dead weight a grader can see.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section class="slide">
+    <p class="eyebrow">Domain &middot; 2 of 4</p>
+    <h2 class="title">GameCatalog<span class="dot">:</span> <em>a lens, not a store</em></h2>
+    <div class="code fill">
+      <div class="line"><span class="k">public class</span> <span class="t">GameCatalog</span>(<span class="t">IEnumerable</span>&lt;<span class="t">Game</span>&gt; games)<span class="label">Primary constructor</span></div>
+      <div class="line">{</div>
+      <div class="line marked first">    <span class="k">public</span> <span class="t">IReadOnlyList</span>&lt;<span class="t">Game</span>&gt; Games { <span class="k">get</span>; } = [.. games];<span class="label">Copied, then frozen</span></div>
+      <div class="line marked last"> </div>
+      <div class="line">    <span class="k">public</span> <span class="t">IEnumerable</span>&lt;<span class="t">Game</span>&gt; <span class="t">Search</span>(<span class="k">string</span> term)</div>
+      <div class="line">        =&gt; [.. Games.Where(g =&gt; g.Search(term))];</div>
+      <div class="line"> </div>
+      <div class="line">    <span class="k">public</span> <span class="t">IEnumerable</span>&lt;<span class="t">Game</span>&gt; <span class="t">ByPlayerCount</span>(<span class="k">int</span> n)</div>
+      <div class="line">        =&gt; [.. Games.Where(g =&gt; g.MinPlayers &lt;= n &amp;&amp; g.MaxPlayers &gt;= n)];</div>
+      <div class="line">}</div>
+    </div>
+    <p class="claim">No <span class="mono">Add</span>. No <span class="mono">Remove</span>. The catalog is <strong>reference data</strong> &mdash; two hundred games that exist in the world and don't change because I clicked something. The spread copies the input, so nobody mutates the list behind its back.</p>
+  </section>
+
+  <!-- 6 -->
+  <section class="slide">
+    <p class="eyebrow">Domain &middot; 3 of 4</p>
+    <h2 class="title">GameCollection<span class="dot">.</span><span class="member">Add</span></h2>
+    <div class="code fill">
+      <div class="line"><span class="k">public class</span> <span class="t">GameCollection</span></div>
+      <div class="line">{</div>
+      <div class="line">    <span class="k">private readonly</span> <span class="t">Dictionary</span>&lt;<span class="k">string</span>, <span class="t">OwnedGame</span>&gt; _games = []; <span class="c">// Key is game title</span><span class="label">Data structure</span></div>
+      <div class="line"> </div>
+      <div class="line">    <span class="k">public void</span> <span class="t">Add</span>(<span class="t">OwnedGame</span> game)</div>
+      <div class="line">    {</div>
+      <div class="line marked first">        <span class="k">if</span> (_games.ContainsKey(game.Game.Name))<span class="label">The invariant</span></div>
+      <div class="line marked">        {</div>
+      <div class="line marked">            <span class="k">throw new</span> <span class="t">InvalidOperationException</span>(<span class="s">"Title is already owned."</span>);</div>
+      <div class="line marked last">        }</div>
+      <div class="line"> </div>
+      <div class="line">        _games.Add(game.Game.Name, game);</div>
+      <div class="line">    }</div>
+      <div class="line">}</div>
+    </div>
+    <p class="claim">A title is on the shelf <strong>once</strong> &mdash; and because the shelf is a dictionary keyed by title, enforcing that costs <strong>one lookup</strong>, not a scan.</p>
+  </section>
+
+  <!-- 7 -->
+  <section class="slide">
+    <p class="eyebrow">Domain &middot; 4 of 4</p>
+    <h2 class="title sm">Play<span class="dot">,</span> PlayerResult<span class="dot">,</span> PlayLog</h2>
+    <div class="cols lean fill">
+      <div class="code">
+        <div class="line"><span class="k">public</span> <span class="t">Play</span>(<span class="t">Game</span> g, <span class="t">DateTime</span> d, <span class="t">List</span>&lt;<span class="t">PlayerResult</span>&gt; r,</div>
+        <div class="line">            <span class="k">int</span>? durationMinutes = <span class="k">null</span>, <span class="k">string</span>? location = <span class="k">null</span>)</div>
+        <div class="line">{</div>
+        <div class="line">    Game = g; PlayedOn = d; Results = r;</div>
+        <div class="line"> </div>
+        <div class="line marked first">    <span class="k">if</span> (Game.MaxPlayers &lt; Results.Count)<span class="label">Seat check</span></div>
+        <div class="line marked">        <span class="k">throw new</span> <span class="t">ArgumentOutOfRangeException</span>(...);</div>
+        <div class="line marked last"> </div>
+        <div class="line">    DurationMinutes = durationMinutes; Location = location;</div>
+        <div class="line">}</div>
+        <div class="line"> </div>
+        <div class="line"><span class="k">public void</span> <span class="t">Record</span>(<span class="t">Play</span> p)                          <span class="c">// PlayLog</span></div>
+        <div class="line">{</div>
+        <div class="line marked first">    <span class="k">if</span> (!p.Results.Exists(pr =&gt; pr.PlayerName == OwnerName))<span class="label">Owner check</span></div>
+        <div class="line marked last">        <span class="k">throw new</span> <span class="t">InvalidOperationException</span>(...);</div>
+        <div class="line"> </div>
+        <div class="line">    _plays.Add(p);</div>
+        <div class="line">}</div>
+      </div>
+      <div class="cols" style="grid-template-columns: 1fr;">
+        <div class="card">
+          <h3>Upper bound only</h3>
+          <p>Too many seats is impossible. <strong>Too few is legal</strong> &mdash; solo plays of Spirit Island are real, so <span class="mono">MinPlayers</span> is guidance, not a rule.</p>
+        </div>
+        <div class="card">
+          <h3>It's <em>my</em> log</h3>
+          <p><span class="mono">PlayLog</span> has an <span class="mono">OwnerName</span>, and every play must contain them. A log of evenings I wasn't at is somebody else's log.</p>
+        </div>
+        <div class="card">
+          <h3>Nullable on purpose</h3>
+          <p><span class="mono">Score?</span>, <span class="mono">Duration?</span>, <span class="mono">Location?</span>. Real logging is lossy &mdash; The Crew has no score, and nobody times a filler game.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section class="slide">
+    <p class="eyebrow">The through-line</p>
+    <h2 class="title">Rules live in constructors</h2>
+    <div class="fill">
+      <table class="grid">
+        <thead>
+          <tr><th>The rule</th><th>Enforced where</th><th>What it costs you to break it</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono">One copy per title</td><td class="mono">GameCollection.Add</td><td>Throws before the duplicate ever lands in the dictionary</td></tr>
+          <tr><td class="mono">Seats &le; MaxPlayers</td><td class="mono">Play constructor</td><td>An impossible Play object cannot be constructed at all</td></tr>
+          <tr><td class="mono">Owner is at the table</td><td class="mono">PlayLog.Record</td><td>The log refuses a play that isn't mine</td></tr>
+          <tr><td class="mono">Catalog is immutable</td><td class="mono">GameCatalog ctor</td><td>No setter exists to break</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="claim">There is <strong>no bypass path</strong> &mdash; no internal <span class="mono">LoadUnchecked</span> for the seed data to sneak through. An invariant you can bypass isn't an invariant. That decision is what makes the next half of this talk necessary.</p>
+  </section>
+
+  <!-- 9 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; why</p>
+    <h2 class="title">The demo needed a year of evenings</h2>
+    <div class="cols three fill">
+      <div class="card">
+        <h3>The requirement</h3>
+        <p>Search across ~200 games. Filter 78 plays. Show a <strong>most played</strong> list that means something.</p>
+        <p>Four hand-typed rows don't demonstrate filtering &mdash; they demonstrate a list.</p>
+      </div>
+      <div class="card">
+        <h3>The constraint</h3>
+        <p>Demo day: unknown network, unknown room. The app <strong>must not call an API</strong> to start.</p>
+        <p>And the data must be identical on every run, or a rehearsal proves nothing.</p>
+      </div>
+      <div class="card">
+        <h3>The source</h3>
+        <p><strong>BoardGameGeek's XML API</strong> &mdash; my actual 28-game shelf, plus the top-ranked base games from a public rank dump.</p>
+        <p>Real names, real designers, real seat counts.</p>
+      </div>
+    </div>
+    <p class="claim">So: get real data <strong>once</strong>, at build time, and hand the app something that's already true when it starts.</p>
+  </section>
+
+  <!-- 10 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; the decision</p>
+    <h2 class="title sm">Three ways to feed the app</h2>
+    <div class="fill">
+      <table class="grid">
+        <thead>
+          <tr><th>Approach</th><th>What happens at startup</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Call the API live</td>
+            <td>The app depends on a network, on BGG being up, and on a token shipping with it. Data drifts between rehearsal and demo.</td>
+            <td class="verdict">No</td>
+          </tr>
+          <tr>
+            <td>Ship JSON, parse on boot</td>
+            <td>Parsing code, error handling, and a file the compiler never checks. A typo in a game name is found by a user, not a build.</td>
+            <td class="verdict">No</td>
+          </tr>
+          <tr class="win">
+            <td>Emit C# source</td>
+            <td>The seed <em>is</em> code. The compiler type-checks all 743 lines of it, it lands in git as a readable diff, and startup is a list literal.</td>
+            <td class="verdict">Chosen</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="claim">The seeder is a <strong>code generator</strong>. Its output is three committed <span class="mono">.cs</span> files, and its only runtime is my machine, before the commit.</p>
+  </section>
+
+  <!-- 11 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; shape</p>
+    <h2 class="title">One console app, two jobs</h2>
+    <div class="cols two fill">
+      <div class="card">
+        <h3>dotnet run</h3>
+        <p><span class="chip raw">FETCH</span></p>
+        <p>Talks to BGG. Writes raw XML to <span class="mono">raw/</span> and touches nothing else. Spends API calls.</p>
+        <p><strong>Run rarely.</strong></p>
+      </div>
+      <div class="card">
+        <h3>dotnet run -- emit</h3>
+        <p><span class="chip">EMIT</span></p>
+        <p>Reads <span class="mono">raw/</span> off disk. Writes three <span class="mono">.cs</span> files into the web project. Never opens a socket.</p>
+        <p><strong>Run as many times as it takes.</strong></p>
+      </div>
+    </div>
+    <div class="code">
+      <div class="line"><span class="k">if</span> (args.<span class="t">FirstOrDefault</span>() == <span class="s">"emit"</span>)</div>
+      <div class="line">{</div>
+      <div class="line">    <span class="t">EmitCatalog</span>(); <span class="t">EmitCollection</span>(); <span class="t">EmitLog</span>(); <span class="k">return</span> 0;<span class="label">Offline path</span></div>
+      <div class="line">}</div>
+    </div>
+    <p class="claim">The split is the whole architecture. <strong>Fetching is expensive and irreversible; parsing is cheap and wrong the first four times.</strong> They must not share a run.</p>
+  </section>
+
+  <!-- 12 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; phase one</p>
+    <h2 class="title sm">Fetch: be a polite client</h2>
+    <div class="cols lean fill">
+      <ul class="points">
+        <li><strong>202 means "come back later."</strong><br><span>BGG queues a collection request. Poll every 5s until 200 &mdash; not an error, a handshake.</span></li>
+        <li><strong>Throttling arrives as a 500, not a 429.</strong><br><span>So batch 20 ids per call, sleep 5 seconds between, and bail with instructions if a 5xx shows up.</span></li>
+        <li><strong>Every batch is skipped if its file exists.</strong><br><span>Ten calls, resumable. Getting rate-limited at batch 8 costs you batches 8&ndash;10, not all ten.</span></li>
+        <li><strong>The token is build-time only.</strong><br><span>Read from an environment variable, never in a commit, never in the web app's config at all.</span></li>
+      </ul>
+      <div class="code">
+        <div class="line"><span class="k">while</span> (<span class="k">true</span>)</div>
+        <div class="line">{</div>
+        <div class="line">    <span class="k">var</span> response = <span class="k">await</span> http.<span class="t">GetAsync</span>(collectionUrl);</div>
+        <div class="line"> </div>
+        <div class="line marked first">    <span class="k">if</span> (response.StatusCode == <span class="t">HttpStatusCode</span>.Accepted)<span class="label">202</span></div>
+        <div class="line marked">    {</div>
+        <div class="line marked">        <span class="k">await</span> <span class="t">Task</span>.<span class="t">Delay</span>(5000);</div>
+        <div class="line marked">        <span class="k">continue</span>;</div>
+        <div class="line marked last">    }</div>
+        <div class="line"> </div>
+        <div class="line">    response.<span class="t">EnsureSuccessStatusCode</span>();</div>
+        <div class="line">    collectionResult = <span class="k">await</span> response.Content...;</div>
+        <div class="line">    <span class="k">break</span>;</div>
+        <div class="line">}</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 13 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; the rule that saved the most time</p>
+    <h2 class="title">Save the raw response before you understand it</h2>
+    <div class="cols two fill">
+      <div class="card quiet">
+        <h3>If parse and fetch share a run</h3>
+        <p>A parsing bug that surfaces at <strong>game 147 of 200</strong> &mdash; a game with no designer link, say &mdash; costs you the whole fetch again.</p>
+        <p>Ten API calls. Fifty seconds of mandatory sleeping. A chance of getting throttled on the retry.</p>
+      </div>
+      <div class="card">
+        <h3>If the raw XML is already on disk</h3>
+        <p>The same bug costs you <strong>a re-run of a pure function</strong>. Two seconds, no network, infinitely repeatable.</p>
+        <p>1.5&nbsp;MB of XML across ~200 games, gitignored, sitting in <span class="mono">raw/</span>.</p>
+      </div>
+    </div>
+    <p class="claim">This is the same instinct as the invariants: <strong>make the expensive thing happen once, and make the fallible thing cheap to repeat.</strong> Fetching is irreversible; parsing should never be.</p>
+  </section>
+
+  <!-- 14 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; phase two</p>
+    <h2 class="title sm">Emit: XML in, C# out</h2>
+    <div class="code fill">
+      <div class="line"><span class="k">string</span> name = item.<span class="t">Elements</span>(<span class="s">"name"</span>)</div>
+      <div class="line marked first">                  .<span class="t">First</span>(n =&gt; (<span class="k">string</span>?)n.<span class="t">Attribute</span>(<span class="s">"type"</span>) == <span class="s">"primary"</span>)<span class="label">Several names; one primary</span></div>
+      <div class="line marked last">                  .<span class="t">Attribute</span>(<span class="s">"value"</span>)!.Value;</div>
+      <div class="line"> </div>
+      <div class="line"><span class="k">string</span> designer = item.<span class="t">Elements</span>(<span class="s">"link"</span>)</div>
+      <div class="line marked first">    .<span class="t">FirstOrDefault</span>(l =&gt; (<span class="k">string</span>?)l.<span class="t">Attribute</span>(<span class="s">"type"</span>) == <span class="s">"boardgamedesigner"</span>)?<span class="label">20% have several; some have none</span></div>
+      <div class="line marked last">    .<span class="t">Attribute</span>(<span class="s">"value"</span>)?.Value ?? <span class="s">"Unknown"</span>;</div>
+      <div class="line"> </div>
+      <div class="line"><span class="t">File</span>.<span class="t">AppendAllText</span>(fileName,</div>
+      <div class="line">    $<span class="s">"new Game {{ Name = {</span><span class="t">Quote</span>(name)<span class="s">}, Designer = {</span><span class="t">Quote</span>(designer)<span class="s">}, ..."</span>);</div>
+      <div class="line"> </div>
+      <div class="line marked first"><span class="k">static string</span> <span class="t">Quote</span>(<span class="k">string</span> s)<span class="label">Sea Salt &amp; Paper, Kutn&aacute; Hora, "Duel"</span></div>
+      <div class="line marked last">    =&gt; <span class="s">"\""</span> + s.<span class="t">Replace</span>(<span class="s">"\\"</span>, <span class="s">"\\\\"</span>).<span class="t">Replace</span>(<span class="s">"\""</span>, <span class="s">"\\\""</span>) + <span class="s">"\""</span>;</div>
+    </div>
+    <p class="claim">LINQ-to-XML, <strong>zero NuGet packages</strong>. A client library would take my code off the page &mdash; and the rubric marks my code. The generated files carry <span class="mono">&lt;auto-generated /&gt;</span>: every fix goes in the emitter and gets re-emitted, never hand-patched.</p>
+  </section>
+
+  <!-- 15 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; the hard part</p>
+    <h2 class="title sm">Inventing 78 evenings that look lived-in</h2>
+    <div class="cols three fill">
+      <div class="card">
+        <h3>Shaped, not flat</h3>
+        <p>Three favourites at 8&ndash;11 plays, seven regulars at 4, a long tail at 1.</p>
+        <p><span class="mono">MostPlayed()</span> has nothing to say about a flat distribution.</p>
+      </div>
+      <div class="card">
+        <h3>Honest gaps</h3>
+        <p>30% of plays have no duration. 20% no location. Co-ops win or lose <strong>as a table</strong>. One play in ten records no winner at all.</p>
+      </div>
+      <div class="card">
+        <h3>Seeded randomness</h3>
+        <p><span class="mono">new Random(20260826)</span> &mdash; a literal seed, so a re-emit reproduces the same history and the diff is empty.</p>
+      </div>
+    </div>
+    <div class="code">
+      <div class="line"><span class="c">// Fixed seed, so re-emitting gives the same history and an empty diff</span></div>
+      <div class="line marked first"><span class="k">var</span> random = <span class="k">new</span> <span class="t">Random</span>(20260826);<span class="label">Randomness lives in the emitter</span></div>
+      <div class="line marked last"><span class="k">var</span> windowStart = <span class="k">new</span> <span class="t">DateTime</span>(2025, 9, 1);</div>
+    </div>
+    <p class="claim">The randomness is in the <strong>seeder</strong>. The web app gets literal <span class="mono">new DateTime(2025, 9, 2)</span> &mdash; not <span class="mono">DateTime.Now.AddDays(-40)</span>, which would slide the history forward every day until the demo showed plays in the future.</p>
+  </section>
+
+  <!-- 16 -->
+  <section class="slide">
+    <p class="eyebrow">Seeder &middot; where the two halves meet</p>
+    <h2 class="title sm">A bad row doesn't render badly. It stops the app.</h2>
+    <div class="cols lean fill">
+      <div class="card">
+        <h3>The failure mode</h3>
+        <p>The store is a <strong>singleton, seeded in its constructor</strong>. So a play with seven seats at a four-player game doesn't produce a wrong row &mdash;</p>
+        <p>it throws <em>inside dependency injection</em>, and the app fails to start behind a stack trace that points nowhere useful.</p>
+        <p><strong>On stage that reads as "Blazor is broken."</strong></p>
+      </div>
+      <div class="code">
+        <div class="line"><span class="c">// Check the things that throw at runtime,</span></div>
+        <div class="line"><span class="c">// before anything hits the file</span></div>
+        <div class="line"><span class="k">foreach</span> (<span class="k">var</span> play <span class="k">in</span> plays)</div>
+        <div class="line">{</div>
+        <div class="line marked first">    <span class="k">if</span> (!maxPlayers.<span class="t">ContainsKey</span>(play.Name))<span class="label">Find() would throw</span></div>
+        <div class="line marked last">        <span class="k">throw new</span> <span class="t">Exception</span>(...);</div>
+        <div class="line"> </div>
+        <div class="line marked first">    <span class="k">if</span> (!play.Results.<span class="t">Any</span>(r =&gt; r.PlayerName == owner))<span class="label">Record() would throw</span></div>
+        <div class="line marked last">        <span class="k">throw new</span> <span class="t">Exception</span>(...);</div>
+        <div class="line"> </div>
+        <div class="line marked first">    <span class="k">if</span> (play.Results.Count &gt; maxPlayers[play.Name])<span class="label">Play ctor would throw</span></div>
+        <div class="line marked last">        <span class="k">throw new</span> <span class="t">Exception</span>(...);</div>
+        <div class="line">}</div>
+      </div>
+    </div>
+    <p class="claim">Three checks in the emitter, one per domain invariant, run <strong>before a single byte is written</strong>. The seeder fails loudly on my machine so the app never fails quietly on the projector.</p>
+  </section>
+
+  <!-- 17 -->
+  <section class="slide">
+    <p class="eyebrow">What came out</p>
+    <h2 class="title">By the numbers</h2>
+    <div class="stats fill">
+      <div class="stat"><b>200</b><span>games in the catalog, parsed from raw XML</span></div>
+      <div class="stat"><b>28</b><span>games actually on my shelf</span></div>
+      <div class="stat"><b>78</b><span>plays across twelve months</span></div>
+      <div class="stat"><b>743</b><span>lines of generated, compiler-checked C#</span></div>
+      <div class="stat"><b>0</b><span>NuGet packages &mdash; and zero sockets at runtime</span></div>
+    </div>
+    <p class="claim">Four of those 78 plays are games I <strong>don't own</strong> &mdash; Brass, Terraforming Mars, 7 Wonders Duel, Scythe. They're four rows out of seventy-eight, and they're the reason the model separates the shelf from the log at all.</p>
+  </section>
+
+  <!-- 18 -->
+  <section class="slide">
+    <p class="eyebrow">What I'd take to the next project</p>
+    <h2 class="title">Three things that transferred</h2>
+    <div class="fill">
+      <ul class="points">
+        <li><strong>Put the rule where it can't be skipped.</strong><br><span>Constructors and guarded methods, with no bypass for "trusted" data. The moment I allowed no back door, the seeder had to get correct &mdash; and that's a better trade than a back door I'd forget about.</span></li>
+        <li><strong>Separate the expensive step from the fallible one.</strong><br><span>Fetch once, parse a hundred times. This is the same shape as caching, as build artifacts, as anything where one half of a pipeline costs real money and the other half is where the bugs are.</span></li>
+        <li><strong>Generate code when the compiler can then check it.</strong><br><span>The seed is 743 lines nobody typed, and the build validates every one. A JSON file of the same data validates nothing until a user opens the app.</span></li>
+      </ul>
+    </div>
+    <p class="claim"><strong>Questions.</strong></p>
+  </section>
+
+  <div class="chrome">
+    <span class="mono">MeepleLedger</span>
+    <span class="track"><i id="bar"></i></span>
+    <span class="num" id="counter">1 / 18</span>
+  </div>
+
+  <div class="nav">
+    <button type="button" id="prev" aria-label="Previous slide"></button>
+    <button type="button" id="next" aria-label="Next slide"></button>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+    var counter = document.getElementById('counter');
+    var bar = document.getElementById('bar');
+    var i = 0;
+
+    function show(n) {
+      i = Math.max(0, Math.min(slides.length - 1, n));
+      slides.forEach(function (s, k) { s.classList.toggle('on', k === i); });
+      counter.textContent = (i + 1) + ' / ' + slides.length;
+      bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    }
+
+    document.getElementById('next').addEventListener('click', function () { show(i + 1); });
+    document.getElementById('prev').addEventListener('click', function () { show(i - 1); });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ' || e.key === 'Enter') { show(i + 1); e.preventDefault(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp' || e.key === 'Backspace') { show(i - 1); e.preventDefault(); }
+      else if (e.key === 'Home') { show(0); }
+      else if (e.key === 'End') { show(slides.length - 1); }
+    });
+
+    show(0);
+  })();
+</script>
+</body>
+</html>

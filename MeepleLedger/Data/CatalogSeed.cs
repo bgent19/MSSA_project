@@ -15,7 +15,7 @@ public static class CatalogSeed
         new Game { Name = "The Crew: Mission Deep Sea", Designer = "Thomas Sing", MinPlayers = 2, MaxPlayers = 5, PlaytimeMinutes = 20 },
         new Game { Name = "Decrypto", Designer = "Thomas Dagenais-Lespérance", MinPlayers = 3, MaxPlayers = 8, PlaytimeMinutes = 45 },
         new Game { Name = "Everdell", Designer = "James A. Wilson", MinPlayers = 1, MaxPlayers = 4, PlaytimeMinutes = 80 },
-        new Game { Name = "Faraway", Designer = "Johannes Goupy", MinPlayers = 2, MaxPlayers = 6, PlaytimeMinutes = 30 },
+        new Game { Name = "Faraway", Designer = "Johannes Goupy", MinPlayers = 2, MaxPlayers = 6, PlaytimeMinutes = 25 },
         new Game { Name = "Flip 7", Designer = "Eric Olsen", MinPlayers = 3, MaxPlayers = 18, PlaytimeMinutes = 20 },
         new Game { Name = "Forest Shuffle", Designer = "Kosch", MinPlayers = 2, MaxPlayers = 5, PlaytimeMinutes = 60 },
         new Game { Name = "The Fox in the Forest", Designer = "Joshua Buergel", MinPlayers = 2, MaxPlayers = 2, PlaytimeMinutes = 30 },
