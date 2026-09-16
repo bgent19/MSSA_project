@@ -1,0 +1,50 @@
+﻿@rendermode InteractiveServer
+@inject IGameCatalogSource CatalogSource
+
+@code {
+    [Parameter] public EventCallback<Game> OnGameSelected { get; set; }
+
+    private string _term = "";
+    private const int MaxRows = 10;
+
+    private IReadOnlyList<Game> Results =>
+        string.IsNullOrWhiteSpace(_term)
+        ? []
+        : [.. CatalogSource.Catalog.Search(_term)];
+
+    private async Task Pick(Game game)
+    {
+        await OnGameSelected.InvokeAsync(game);
+        _term = "";
+    }
+}
+
+<div class="game-picker">
+    <input class="form-control"
+    placeholder="Type part of game title..."
+    @bind="_term"
+    @bind:event="oninput" />
+
+    @if (Results.Count > 0)
+    {
+        <ul class="list-group mt-1">
+            @foreach (var game in Results.Take(MaxRows))
+            {
+                <li class="list-group-item list-group-item-action"
+                @key="game"
+                @onclick="() => Pick(game)">
+                @game.Name
+                    <small class="text-muted">— @game.Designer · @game.MinPlayers–@game.MaxPlayers players</small>
+                </li>
+            }
+            @if (Results.Count > MaxRows)
+            {
+                <li class="list-group-item text-muted">@(Results.Count - MaxRows) more - keep typing</li>
+            }
+        </ul>
+    }
+    else if (!string.IsNullOrWhiteSpace(_term))
+    {
+        <p class="text-muted mt-1">No games match "@_term"</p>
+    }
+</div>
