@@ -1,7 +1,17 @@
 ﻿@page "/"
+@rendermode InteractiveServer
 
 <PageTitle>Home</PageTitle>
 
-<h1>Hello, universe!</h1>
+<h1>Picker harness</h1>
 
-Welcome to new app.
+<GameSearchPicker OnGameSelected="game => _picked = game" />
+
+@if (_picked is not null)
+{
+    <p>You picked <strong>@_picked.Name</strong></p>
+}
+
+@code {
+    private Game? _picked;
+}
