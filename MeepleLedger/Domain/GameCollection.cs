@@ -5,6 +5,8 @@
         private readonly Dictionary<string, OwnedGame> _games = []; // Key is game title
         public int TotalGames => _games.Count;
 
+        public IEnumerable<OwnedGame> Games => [.. _games.Values.OrderBy(og => og.Game.Name)];
+
         public void Add(OwnedGame game)
         {
             if (_games.ContainsKey(game.Game.Name))
@@ -32,6 +34,21 @@
         {
             return [.. _games.Values.Where((g) => ((g.Game.MinPlayers <= n) && (g.Game.MaxPlayers >= n)))];
         }
+
+        public IEnumerable<OwnedGame> Find(string? term, int? playerCount)
+        {
+            IEnumerable<OwnedGame> result = Games;
+
+            if (!string.IsNullOrWhiteSpace(term))
+                result = result.Intersect(Search(term));
+
+            if (playerCount is int n)
+                result = result.Intersect(FilterByPlayerCount(n));
+
+            return result;
+        }
+
+
     }
 
 }
