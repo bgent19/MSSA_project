@@ -1,0 +1,69 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject IMeepleStore Store
+
+<PageTitle>Collection</PageTitle>
+
+<h1>Collection</h1>
+
+<div class="container">
+    <div class="row">
+        <input class="form-control col"
+               placeholder="Search by title or designer"
+               @bind="_term"
+               @bind:event="oninput" />
+
+        <select class="form-select col" @bind="_players">
+            <option value="">Any player count</option>
+            @for (var n = 1; n <= 8; n++)
+            {
+                <option value="@n">@n players</option>
+            }
+        </select>
+    </div>
+</div>
+
+<p class="text-muted">Showing @Rows.Count of @Store.Collection.TotalGames games</p>
+
+@if (Rows.Count == 0)
+{
+    <p>No owned games match</p>
+}
+else
+{
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Designer</th>
+                <th>Players</th>
+                <th>Playtime</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var owned in Rows)
+            {
+                var game = owned.Game;
+                <tr @key="game">
+                    <td>@game.Name</td>
+                    <td>@game.Designer</td>
+                    <td>@PlayerRange(game)</td>
+                    <td>@game.PlaytimeMinutes min</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+
+@code {
+    private string _term = "";
+    private int? _players;
+
+    private IReadOnlyList<OwnedGame> Rows => [.. Store.Collection.Find(_term, _players)];
+
+    private static string PlayerRange(Game g) =>
+        g.MinPlayers == g.MaxPlayers ? $"{g.MinPlayers}" : $"{g.MinPlayers}-{g.MaxPlayers}";
+
+
+}
