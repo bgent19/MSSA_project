@@ -7,7 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-builder.Services.AddSingleton<IGameCatalogsource, SeededCatalogSource>();
+builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
 builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
 
 var app = builder.Build();

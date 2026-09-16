@@ -3,7 +3,7 @@ using MeepleLedger.Domain;
 
 namespace MeepleLedger.Storage;
 
-public class SeededCatalogSource : IGameCatalogsource
+public class SeededCatalogSource : IGameCatalogSource
 {
     public GameCatalog Catalog { get; } = new GameCatalog(CatalogSeed.Games);
 }

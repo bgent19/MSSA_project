@@ -2,7 +2,7 @@
 
 namespace MeepleLedger.Storage;
 
-public interface IGameCatalogsource
+public interface IGameCatalogSource
 {
     GameCatalog Catalog { get; }
 }

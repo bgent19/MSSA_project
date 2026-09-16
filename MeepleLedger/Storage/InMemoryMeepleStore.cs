@@ -1,16 +1,15 @@
 ﻿
 using MeepleLedger.Data;
 using MeepleLedger.Domain;
-using Microsoft.VisualBasic;
 
 namespace MeepleLedger.Storage;
 
 public class InMemoryMeepleStore : IMeepleStore
 {
-    public GameCollection Collection { get; set; } = new();
+    public GameCollection Collection { get; } = new();
     public PlayLog PlayLog { get; } = new() { OwnerName="TheGentleBean"};
 
-    public InMemoryMeepleStore(IGameCatalogsource catalogSource)
+    public InMemoryMeepleStore(IGameCatalogSource catalogSource)
     {
         var catalog = catalogSource.Catalog;
 
