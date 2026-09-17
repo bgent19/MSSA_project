@@ -19,9 +19,20 @@ else
     </p>
 }
 
-<input type="date"   class="form-control" @bind="_date" />
-<input type="number" class="form-control" @bind="_duration" min="1" placeholder="Duration (minutes)"/>
-<input type="text"   class="form-control" @bind="_location"         placeholder="Location"/>
+<div class="row g-2 mb-3">
+    <div class="col-md-4">
+        <label class="form-label">Date</label>
+        <input type="date"   class="form-control" @bind="_date" />
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">Duration (minutes)</label>
+        <input type="number" class="form-control" @bind="_duration" min="1"/>
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">Location</label>
+        <input type="text"   class="form-control" @bind="_location"/>
+    </div>
+</div>
 
 <table class="table">
     <thead><tr><th>Player</th><th>Score</th><th>Winner</th><th></th></tr></thead>
@@ -32,7 +43,7 @@ else
             <tr @key="r">
                 <td><input class="form-control"               @bind="r.PlayerName" disabled="@isOwner" /></td>
                 <td><input class="form-control" type="number" @bind="r.Score"                          /></td>
-                <td><input type="checkbox"                    @bind="r.IsWinner"                       /></td>
+                <td><input class="form-check-input" type="checkbox" @bind="r.IsWinner"                 /></td>
                 <td>
                     @if (!isOwner)
                     {
@@ -43,7 +54,7 @@ else
         }
     </tbody>
 </table>
-<button class="btn btn-outline-secondary" @onclick="AddPlayer">Add player</button>
+<button class="btn btn-outline-secondary mb-3" @onclick="AddPlayer">Add player</button>
 
 @if (_error is not null)
 {
@@ -54,7 +65,7 @@ else
     <div class="alert alert-success">@_confirmation</div>
 }
 
-<button class="btn btn-primary" @onclick="Submit">Log it</button>
+<button class="btn btn-primary mb-3" @onclick="Submit">Log it</button>
 
 
 @code {

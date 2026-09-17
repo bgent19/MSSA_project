@@ -6,14 +6,15 @@
 
 <h1>Collection</h1>
 
-<div class="container">
-    <div class="row">
-        <input class="form-control col"
+<div class="row g-2 mb-3">
+    <div class="col-md-8">
+        <input class="form-control"
                placeholder="Search by title or designer"
                @bind="_term"
                @bind:event="oninput" />
-
-        <select class="form-select col" @bind="_players">
+    </div>
+    <div class="col-md-4">
+        <select class="form-select" @bind="_players">
             <option value="">Any player count</option>
             @for (var n = 1; n <= 8; n++)
             {
@@ -45,8 +46,8 @@ else
             {
                 var game = owned.Game;
                 <tr @key="game">
-                    <td>@game.Name</td>
-                    <td>@game.Designer</td>
+                    <td class="text-truncate" style="max-width: 20rem">@game.Name</td>
+                    <td class="text-truncate" style="max-width: 14rem">@game.Designer</td>
                     <td>@PlayerRange(game)</td>
                     <td>@game.PlaytimeMinutes min</td>
                 </tr>
