@@ -1,0 +1,116 @@
+﻿@page "/log"
+@rendermode InteractiveServer
+@inject IMeepleStore Store
+
+<PageTitle>Log a Play</PageTitle>
+
+<h1>Log a Play</h1>
+
+@if (_game is null)
+{
+    <GameSearchPicker OnGameSelected="game => _game = game" />
+}
+else
+{
+    <p>
+        <strong>@_game.Name</strong>
+        <small class="text-muted">@_game.MinPlayers-@_game.MaxPlayers players</small>
+        <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
+    </p>
+}
+
+<input type="date"   class="form-control" @bind="_date" />
+<input type="number" class="form-control" @bind="_duration" min="1" placeholder="Duration (minutes)"/>
+<input type="text"   class="form-control" @bind="_location"         placeholder="Location"/>
+
+<table class="table">
+    <thead><tr><th>Player</th><th>Score</th><th>Winner</th><th></th></tr></thead>
+    <tbody>
+        @foreach (var r in _results)
+        {
+            var isOwner = r == _results[0];
+            <tr @key="r">
+                <td><input class="form-control"               @bind="r.PlayerName" disabled="@isOwner" /></td>
+                <td><input class="form-control" type="number" @bind="r.Score"                          /></td>
+                <td><input type="checkbox"                    @bind="r.IsWinner"                       /></td>
+                <td>
+                    @if (!isOwner)
+                    {
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => _results.Remove(r)">remove</button>
+                    }
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+<button class="btn btn-outline-secondary" @onclick="AddPlayer">Add player</button>
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>             
+}
+@if(_confirmation is not null)
+{
+    <div class="alert alert-success">@_confirmation</div>
+}
+
+<button class="btn btn-primary" @onclick="Submit">Log it</button>
+
+
+@code {
+    private Game? _game;
+    private DateTime _date = DateTime.Today;
+    private int? _duration;
+    private string? _location;
+    private List<PlayerResult> _results = [];  // row 0 is always the owner
+    private string? _error;
+    private string? _confirmation;
+
+    protected override void OnInitialized() => ResetForm();
+
+    private void ResetForm()
+    {
+        _game = null;
+        _date = DateTime.Today;
+        _duration = null;
+        _location = null;
+        _results = [ new PlayerResult { PlayerName = Store.PlayLog.OwnerName } ];
+    }
+
+    private void AddPlayer() => _results.Add(new PlayerResult { PlayerName = "" });
+
+    private void Submit()
+    {
+        _error = null;
+        _confirmation = null;
+
+        if(_game is null)
+        {
+            _error = "Pick a game first.";
+            return;
+        }
+
+        var results = _results
+                     .Where(r => !string.IsNullOrWhiteSpace(r.PlayerName))
+                     .ToList();
+
+        try
+        {
+            var play = new Play(_game, _date, results, _duration, _location);
+            Store.PlayLog.Record(play);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            _error = $"{_game.Name} seats at most {_game.MaxPlayers} players - you have {results.Count}.";
+            return;
+        }
+        catch(InvalidOperationException ex)
+        {
+            _error = ex.Message;
+            return;
+        }
+
+        _confirmation = $"Logged {_game.Name} on {_date:d}.";
+        ResetForm();        
+    }
+}
