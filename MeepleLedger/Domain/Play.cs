@@ -2,6 +2,7 @@
 {
     public class Play
     {
+        public Guid Id { get; init; } = Guid.NewGuid();
         public Game Game { get; set; }
         public DateTime PlayedOn { get; set; }
         public int? DurationMinutes { get; set; }
