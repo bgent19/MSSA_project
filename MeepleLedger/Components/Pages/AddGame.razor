@@ -1,0 +1,77 @@
+@page "/collection/add"
+@rendermode InteractiveServer
+@inject IMeepleStore Store
+@inject NavigationManager Nav
+
+<PageTitle>Add a Game</PageTitle>
+
+<h1>Add a Game</h1>
+
+@if (_game is null)
+{
+    <GameSearchPicker OnGameSelected="game => _game = game" />
+}
+else
+{
+    <p>
+        <strong>@_game.Name</strong>
+        <small class="text-muted">@_game.MinPlayers-@_game.MaxPlayers players</small>
+        <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
+    </p>
+}
+
+<div class="row g-2 mb-3">
+    <div class="col-md-4">
+        <label class="form-label">Condition</label>
+        <select class="form-select" @bind="_condition">
+            @foreach (var c in Enum.GetValues<Condition>())
+            {
+                <option value="@c">@c</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-4">
+        <label class="form-label">Date acquired</label>
+        <input type="date" class="form-control" @bind="_dateAcquired" />
+    </div>
+</div>
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+
+<button class="btn btn-primary mb-3" @onclick="Submit">Add to collection</button>
+<a class="btn btn-outline-secondary mb-3 ms-2" href="">Cancel</a>
+
+
+@code {
+    private Game? _game;
+    private Condition _condition = Condition.Mint;
+    private DateTime _dateAcquired = DateTime.Today;
+    private string? _error;
+
+    private void Submit()
+    {
+        _error = null;
+
+        if (_game is null)
+        {
+            _error = "Pick a game first.";
+            return;
+        }
+
+        // No duplicate pre-check here: GameCollection.Add owns that rule.
+        try
+        {
+            Store.Collection.Add(new OwnedGame { Game = _game, Condition = _condition, DateAcquired = _dateAcquired });
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = $"{_game.Name}: {ex.Message}";
+            return;
+        }
+
+        Nav.NavigateTo("");
+    }
+}
