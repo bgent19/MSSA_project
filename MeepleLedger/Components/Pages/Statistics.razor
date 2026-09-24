@@ -4,10 +4,11 @@
 <PageTitle>Statistics</PageTitle>
 
 <h1>Statistics</h1>
+<p class="page-lede">The numbers behind the bragging rights.</p>
 
 <div class="row g-3 mb-4">
     <div class="col-sm-6">
-        <div class="card text-center">
+        <div class="card stat-tile tile-red text-center">
             <div class="card-body">
                 <div class="display-5">@Store.Collection.TotalGames</div>
                 <div class="text-muted">games owned</div>
@@ -15,7 +16,7 @@
         </div>
     </div>
     <div class="col-sm-6">
-        <div class="card text-center">
+        <div class="card stat-tile tile-blue text-center">
             <div class="card-body">
                 <div class="display-5">@TotalPlays</div>
                 <div class="text-muted">plays logged</div>
@@ -28,7 +29,7 @@
 
 @if (MostPlayed.Count == 0)
 {
-    <p>No plays logged yet</p>
+    <p class="empty-state">No plays logged yet. Go play something!</p>
 }
 else
 {
@@ -44,7 +45,7 @@ else
             {
                 <tr>
                     <td>@game.Name</td>
-                    <td>@Store.PlayLog.ForGame(game).Count()</td>
+                    <td class="num">@Store.PlayLog.ForGame(game).Count()</td>
                 </tr>
             }
         </tbody>
@@ -55,11 +56,11 @@ else
 
 @if (PlayedNotOwned.Count == 0)
 {
-    <p>Every game you've played is in your collection</p>
+    <p class="empty-state">Every game you've played is in your collection. Impressive restraint.</p>
 }
 else
 {
-    <ul>
+    <ul class="card-list">
         @foreach (var game in PlayedNotOwned)
         {
             <li>@game.Name</li>

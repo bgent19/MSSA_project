@@ -8,17 +8,31 @@ main {
     flex: 1;
 }
 
+/* felt table: a soft diagonal weave over deep green */
 .sidebar {
-    background-image: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
+    background-color: var(--felt);
+    background-image:
+        repeating-linear-gradient(45deg, rgba(255, 255, 255, .025) 0 2px, transparent 2px 5px),
+        repeating-linear-gradient(-45deg, rgba(0, 0, 0, .05) 0 2px, transparent 2px 5px),
+        linear-gradient(180deg, var(--felt) 0%, var(--felt-deep) 100%);
+    box-shadow: inset -1px 0 0 rgba(0, 0, 0, .15);
 }
 
 .top-row {
-    background-color: #f7f7f7;
-    border-bottom: 1px solid #d6d5d5;
+    background-color: rgba(244, 239, 228, .92);
+    backdrop-filter: blur(4px);
+    border-bottom: 1px solid var(--edge);
     justify-content: flex-end;
     height: 3.5rem;
     display: flex;
     align-items: center;
+}
+
+.tagline {
+    font-family: var(--font-display);
+    font-style: italic;
+    color: var(--muted);
+    font-size: .95rem;
 }
 
     .top-row ::deep a, .top-row ::deep .btn-link {

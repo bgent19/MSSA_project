@@ -5,6 +5,7 @@
 <PageTitle>Play Log</PageTitle>
 
 <h1>Play Log</h1>
+<p class="page-lede">Every game night, every winner, every "I was one turn away."</p>
 
 <div class="row g-2 mb-3 align-items-center">
     <div class="col-md-8">
@@ -24,11 +25,11 @@
     </div>
 </div>
 
-<p class="text-muted">@Rows.Count plays, most recent first</p>
+<p class="text-muted mb-2">@Rows.Count plays, most recent first</p>
 
 @if (Rows.Count == 0)
 {
-    <p>No plays match</p>
+    <p class="empty-state">No plays match. The dice are getting dusty.</p>
 }
 else
 {
@@ -45,7 +46,7 @@ else
             @foreach (var play in Rows)
             {
                 <tr @key="play">
-                    <td>@play.PlayedOn.ToString("d")</td>
+                    <td class="num text-nowrap">@play.PlayedOn.ToString("d")</td>
                     <td>
                         <a href="games/@Uri.EscapeDataString(play.Game.Name)">@play.Game.Name</a>
                         @if (!Store.Collection.Owns(play.Game.Name))

@@ -7,10 +7,11 @@
 <PageTitle>@Heading</PageTitle>
 
 <h1>@Heading</h1>
+<p class="page-lede">@(IsEditing ? "Amend the record. We won't tell the table." : "Write it down before anyone disputes the final score.")</p>
 
 @if (IsEditing && _editing is null)
 {
-    <p>No play in your log has that id. <a href="plays">Back to the Play Log</a></p>
+    <p class="empty-state">No play in your log has that id.  <a href="plays">Back to the Play Log</a></p>
     return;
 }
 
@@ -20,11 +21,11 @@
 }
 else
 {
-    <p>
+    <div class="chosen-game">
         <strong>@_game.Name</strong>
         <small class="text-muted">@_game.MinPlayers-@_game.MaxPlayers players</small>
         <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
-    </p>
+    </div>
 }
 
 <div class="row g-2 mb-3">
@@ -42,7 +43,7 @@ else
     </div>
 </div>
 
-<table class="table">
+<table class="table mb-2">
     <thead><tr><th>Player</th><th>Score</th><th>Winner</th><th></th></tr></thead>
     <tbody>
         @foreach (var r in _results)
@@ -62,7 +63,7 @@ else
         }
     </tbody>
 </table>
-<button class="btn btn-outline-secondary mb-3" @onclick="AddPlayer">Add player</button>
+<button class="btn btn-outline-secondary mb-3 me-2" @onclick="AddPlayer">Add player</button>
 
 @if (_error is not null)
 {

@@ -6,6 +6,7 @@
 <PageTitle>Add a Game</PageTitle>
 
 <h1>Add a Game</h1>
+<p class="page-lede">Another box for the shelf. Where it physically fits is between you and your bookcase.</p>
 
 @if (_game is null)
 {
@@ -13,11 +14,11 @@
 }
 else
 {
-    <p>
+    <div class="chosen-game">
         <strong>@_game.Name</strong>
         <small class="text-muted">@_game.MinPlayers-@_game.MaxPlayers players</small>
         <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
-    </p>
+    </div>
 }
 
 <div class="row g-2 mb-3">

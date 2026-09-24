@@ -7,7 +7,7 @@
 @if (_game is null)
 {
     <h1>Game not found</h1>
-    <p>No game in the catalog is called "@Name".</p>
+    <p class="empty-state">No game in the catalog is called "@Name".</p>
 }
 else
 {
@@ -23,7 +23,7 @@ else
         }
     </h1>
 
-    <dl class="row">
+    <dl class="row game-facts">
         <dt class="col-sm-3">Designer</dt>
         <dd class="col-sm-9">@(_game.Designer ?? "Unknown")</dd>
 
@@ -49,7 +49,7 @@ else
         }
     </dl>
 
-    <div class="card text-center mb-4" style="max-width: 20rem">
+    <div class="card stat-tile tile-yellow text-center mb-4" style="max-width: 20rem">
         <div class="card-body">
             @if (_record.Rate is double rate)
             {
@@ -68,7 +68,7 @@ else
 
     @if (_plays.Count == 0)
     {
-        <p>You haven't logged a play of this game</p>
+        <p class="empty-state">You haven't logged a play of this game. Its box is starting to feel ignored.</p>
     }
     else
     {
@@ -85,7 +85,7 @@ else
                 @foreach (var play in _plays)
                 {
                     <tr @key="play">
-                        <td>@play.PlayedOn.ToString("d")</td>
+                        <td class="num text-nowrap">@play.PlayedOn.ToString("d")</td>
                         <td>@Players(play)</td>
                         <td>@(play.DurationMinutes is int m ? $"{m} min" : "")</td>
                         <td>@play.Location</td>

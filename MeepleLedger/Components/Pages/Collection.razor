@@ -5,6 +5,7 @@
 <PageTitle>Collection</PageTitle>
 
 <h1>Collection</h1>
+<p class="page-lede">Every box on your shelf, from the brain-burning euros to the party fillers.</p>
 
 <div class="row g-2 mb-3">
     <div class="col-md-8">
@@ -31,7 +32,7 @@
 
 @if (Rows.Count == 0)
 {
-    <p>No owned games match</p>
+    <p class="empty-state">No owned games match. Time to go shopping?</p>
 }
 else
 {
@@ -51,8 +52,8 @@ else
                 <tr @key="game">
                     <td class="text-truncate" style="max-width: 20rem"><a href="games/@Uri.EscapeDataString(game.Name)">@game.Name</a></td>
                     <td class="text-truncate" style="max-width: 14rem">@game.Designer</td>
-                    <td>@PlayerRange(game)</td>
-                    <td>@game.PlaytimeMinutes min</td>
+                    <td class="num">@PlayerRange(game)</td>
+                    <td class="num">@game.PlaytimeMinutes min</td>
                 </tr>
             }
         </tbody>

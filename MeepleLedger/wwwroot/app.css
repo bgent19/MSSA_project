@@ -1,43 +1,519 @@
+/* ============================================================
+   MeepleLedger theme — "game table"
+   Kraft-box ground, felt-green table, wooden player tokens.
+   Shares its type and felt green with presentation/meepleledger-deck.html.
+   ============================================================ */
+
+:root {
+    /* table + box */
+    --kraft:      #F4EFE4;
+    --kraft-dot:  #E4DACA;
+    --panel:      #FFFDF8;
+    --sunk:       #EFE8DA;
+    --edge:       #E0D5C1;
+    --ink:        #1E2420;
+    --muted:      #6E6B5F;
+
+    /* felt */
+    --felt:       #0B5B49;
+    --felt-deep:  #07402F;
+    --felt-light: #E3EFEA;
+
+    /* player tokens */
+    --token-red:    #C8452C;
+    --token-blue:   #2C5578;
+    --token-yellow: #E3A826;
+    --token-green:  #3E8E5E;
+
+    --radius:    12px;
+    --radius-sm: 8px;
+    --lift:      0 1px 0 rgba(30, 36, 32, .04), 0 6px 18px -10px rgba(30, 36, 32, .25);
+
+    --font-display: "Fraunces", Georgia, serif;
+    --font-body:    "IBM Plex Sans", system-ui, sans-serif;
+    --font-mono:    "IBM Plex Mono", ui-monospace, monospace;
+
+    /* Bootstrap hand-off */
+    --bs-body-bg:        var(--kraft);
+    --bs-body-color:     var(--ink);
+    --bs-body-font-family: var(--font-body);
+    --bs-secondary-color: var(--muted);
+    --bs-border-color:   var(--edge);
+    --bs-link-color:     var(--felt);
+    --bs-link-color-rgb: 11, 91, 73;
+    --bs-link-hover-color: var(--felt-deep);
+    --bs-link-hover-color-rgb: 7, 64, 47;
+    --bs-primary-rgb:    11, 91, 73;
+    --bs-emphasis-color: var(--ink);
+}
+
 html {
-    font-size: 18px;
+    font-size: 17px;
 }
 
 html, body {
-    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-family: var(--font-body);
 }
 
-a, .btn-link {
-    color: #006bb7;
+body {
+    background-color: var(--kraft);
+    /* faint board-game grid */
+    background-image: radial-gradient(var(--kraft-dot) 1px, transparent 1.2px);
+    background-size: 22px 22px;
+    color: var(--ink);
 }
 
-.btn-primary {
-    color: #fff;
-    background-color: #1b6ec2;
-    border-color: #1861ac;
+/* ---------- type ---------- */
+
+h1, h2, h3, .h1, .h2, .h3, .h4 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--ink);
 }
 
-.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
-  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem #258cfb;
+h1 {
+    font-size: 2.1rem;
+    margin-bottom: .35rem;
 }
 
-.content {
-    padding-top: 1.1rem;
-}
+    /* four player tokens under every page title */
+    h1::after {
+        content: "";
+        display: block;
+        width: 58px;
+        height: 10px;
+        margin-top: .5rem;
+        background:
+            radial-gradient(circle at 5px 5px,  var(--token-red)    4px, transparent 4.5px),
+            radial-gradient(circle at 21px 5px, var(--token-blue)   4px, transparent 4.5px),
+            radial-gradient(circle at 37px 5px, var(--token-yellow) 4px, transparent 4.5px),
+            radial-gradient(circle at 53px 5px, var(--token-green)  4px, transparent 4.5px);
+    }
 
 h1:focus {
     outline: none;
 }
 
+h2.h4 {
+    margin-top: 2rem;
+    margin-bottom: .85rem;
+}
+
+.page-lede {
+    color: var(--muted);
+    font-size: 1.02rem;
+    margin-bottom: 1.5rem;
+    max-width: 42rem;
+}
+
+.text-muted {
+    color: var(--muted) !important;
+}
+
+a, .btn-link {
+    color: var(--felt);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+}
+
+    a:hover, .btn-link:hover {
+        color: var(--felt-deep);
+    }
+
+.content {
+    padding-top: 1.5rem;
+    padding-bottom: 3rem;
+    max-width: 1100px;
+}
+
+/* ---------- buttons: wooden tokens ---------- */
+
+.btn {
+    font-weight: 500;
+    border-radius: var(--radius-sm);
+    transition: transform .06s ease, box-shadow .06s ease, background-color .15s ease;
+}
+
+    .btn:active {
+        transform: translateY(1px);
+    }
+
+.btn-primary {
+    --bs-btn-color: #fff;
+    --bs-btn-bg: var(--felt);
+    --bs-btn-border-color: var(--felt);
+    --bs-btn-hover-color: #fff;
+    --bs-btn-hover-bg: var(--felt-deep);
+    --bs-btn-hover-border-color: var(--felt-deep);
+    --bs-btn-active-bg: var(--felt-deep);
+    --bs-btn-active-border-color: var(--felt-deep);
+    box-shadow: 0 2px 0 var(--felt-deep);
+}
+
+    .btn-primary:active {
+        box-shadow: 0 1px 0 var(--felt-deep);
+    }
+
+.btn-outline-secondary {
+    --bs-btn-color: var(--ink);
+    --bs-btn-bg: var(--panel);
+    --bs-btn-border-color: var(--edge);
+    --bs-btn-hover-color: var(--ink);
+    --bs-btn-hover-bg: var(--sunk);
+    --bs-btn-hover-border-color: #CFC2A9;
+    --bs-btn-active-color: var(--ink);
+    --bs-btn-active-bg: var(--sunk);
+    --bs-btn-active-border-color: #CFC2A9;
+    box-shadow: 0 2px 0 var(--edge);
+}
+
+.btn-outline-danger {
+    --bs-btn-color: var(--token-red);
+    --bs-btn-border-color: #E7B7AB;
+    --bs-btn-hover-bg: var(--token-red);
+    --bs-btn-hover-border-color: var(--token-red);
+    --bs-btn-active-bg: var(--token-red);
+}
+
+.btn-danger {
+    --bs-btn-bg: var(--token-red);
+    --bs-btn-border-color: var(--token-red);
+    --bs-btn-hover-bg: #A93821;
+    --bs-btn-hover-border-color: #A93821;
+    box-shadow: 0 2px 0 #8E2F1C;
+}
+
+.btn:focus-visible, .btn:active:focus, .btn-link.nav-link:focus,
+.form-control:focus, .form-select:focus, .form-check-input:focus {
+    border-color: var(--felt);
+    box-shadow: 0 0 0 .2rem rgba(11, 91, 73, .22);
+}
+
+/* ---------- forms ---------- */
+
+.form-control, .form-select {
+    background-color: var(--panel);
+    border-color: var(--edge);
+    border-radius: var(--radius-sm);
+}
+
+.form-label {
+    font-family: var(--font-mono);
+    font-size: .72rem;
+    font-weight: 500;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: .3rem;
+}
+
+.form-check-input {
+    border-color: #B9AC94;
+}
+
+    .form-check-input:checked {
+        background-color: var(--felt);
+        border-color: var(--felt);
+    }
+
+.form-control:disabled {
+    background-color: var(--sunk);
+    font-weight: 600;
+}
+
+/* ---------- tables: score sheets ---------- */
+
+.table {
+    --bs-table-bg: var(--panel);
+    --bs-table-color: var(--ink);
+    --bs-table-striped-bg: #F8F4EA;
+    --bs-table-striped-color: var(--ink);
+    --bs-table-hover-bg: var(--felt-light);
+    --bs-border-color: #EDE5D6;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: var(--lift);
+}
+
+    .table > thead > tr > th {
+        background: var(--sunk);
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: .72rem;
+        font-weight: 500;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--edge);
+        padding-top: .7rem;
+        padding-bottom: .7rem;
+    }
+
+    .table > tbody > tr:last-child > td {
+        border-bottom: 0;
+    }
+
+    .table td {
+        vertical-align: middle;
+    }
+
+    .table.table-striped > tbody > tr:hover > * {
+        --bs-table-bg-state: var(--felt-light);
+    }
+
+    .table a {
+        font-weight: 500;
+        text-decoration: none;
+    }
+
+        .table a:not(.btn):hover {
+            text-decoration: underline;
+        }
+
+.num {
+    font-variant-numeric: tabular-nums;
+}
+
+/* on phones, score sheets scroll sideways instead of stretching the page */
+@media (max-width: 640.98px) {
+    .table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+
+    h1 {
+        font-size: 1.75rem;
+    }
+}
+
+/* ---------- cards: punched-out tiles ---------- */
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    box-shadow: var(--lift);
+}
+
+.stat-tile {
+    position: relative;
+    overflow: hidden;
+}
+
+    .stat-tile .card-body {
+        padding: 1.4rem 1rem 1.2rem;
+    }
+
+    .stat-tile .display-5 {
+        font-family: var(--font-display);
+        font-weight: 600;
+        color: var(--felt);
+        line-height: 1.05;
+    }
+
+    .stat-tile .text-muted {
+        font-family: var(--font-mono);
+        font-size: .75rem;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        margin-top: .35rem;
+    }
+
+    /* a colored token rail on the tile's left edge */
+    .stat-tile::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 5px;
+        background: var(--tile-accent, var(--felt));
+    }
+
+.tile-red    { --tile-accent: var(--token-red); }
+.tile-blue   { --tile-accent: var(--token-blue); }
+.tile-yellow { --tile-accent: var(--token-yellow); }
+.tile-green  { --tile-accent: var(--token-green); }
+
+/* ---------- badges ---------- */
+
+.badge {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    letter-spacing: .04em;
+    border-radius: 999px;
+    padding: .3em .7em;
+}
+
+    .badge.fs-6 {
+        font-size: .7rem !important;
+        text-transform: uppercase;
+        letter-spacing: .08em;
+    }
+
+.text-bg-success {
+    background-color: var(--felt-light) !important;
+    color: var(--felt) !important;
+    border: 1px solid #BFD8CD;
+}
+
+.text-bg-warning {
+    background-color: #FBEFD2 !important;
+    color: #7A5A0E !important;
+    border: 1px solid #EFD9A0;
+}
+
+/* ---------- alerts ---------- */
+
+.alert {
+    border-radius: var(--radius-sm);
+    border-width: 1px 1px 1px 5px;
+}
+
+.alert-danger {
+    background: #FBEAE5;
+    border-color: #F0C6BA;
+    border-left-color: var(--token-red);
+    color: #7E2A19;
+}
+
+.alert-success {
+    background: var(--felt-light);
+    border-color: #BFD8CD;
+    border-left-color: var(--felt);
+    color: var(--felt-deep);
+}
+
+    .alert-success::before {
+        content: "🎲 ";
+    }
+
+/* ---------- lists & game picker ---------- */
+
+.list-group {
+    border-radius: var(--radius);
+    box-shadow: var(--lift);
+}
+
+.list-group-item {
+    background: var(--panel);
+    border-color: var(--edge);
+}
+
+.list-group-item-action {
+    cursor: pointer;
+}
+
+    .list-group-item-action:hover {
+        background: var(--felt-light);
+    }
+
+.game-picker {
+    margin-bottom: 1.25rem;
+}
+
+.chosen-game {
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    flex-wrap: wrap;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-left: 5px solid var(--token-yellow);
+    border-radius: var(--radius-sm);
+    padding: .55rem .9rem;
+    margin-bottom: 1.25rem;
+    box-shadow: var(--lift);
+}
+
+    .chosen-game strong {
+        font-family: var(--font-display);
+        font-size: 1.15rem;
+    }
+
+    .chosen-game .btn-link {
+        padding: 0;
+    }
+
+.card-list {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+}
+
+    .card-list li {
+        background: var(--panel);
+        border: 1px solid var(--edge);
+        border-radius: 999px;
+        padding: .3rem .85rem;
+        font-size: .92rem;
+    }
+
+/* ---------- definition list on game detail ---------- */
+
+.game-facts {
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    box-shadow: var(--lift);
+    padding: 1rem 1.25rem .25rem;
+    margin: 1.25rem 0 1.5rem;
+    max-width: 44rem;
+}
+
+    .game-facts dt {
+        font-family: var(--font-mono);
+        font-size: .72rem;
+        font-weight: 500;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding-top: .2rem;
+    }
+
+/* ---------- empty states ---------- */
+
+.empty-state {
+    position: relative;
+    background: var(--panel);
+    border: 1px dashed #CFC2A9;
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem 1rem 3.6rem;
+    color: var(--muted);
+    max-width: 44rem;
+}
+
+    /* a die showing a lonely one */
+    .empty-state::before {
+        content: "";
+        position: absolute;
+        left: 1.1rem;
+        top: 50%;
+        margin-top: -14px;
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
+        border: 2px solid #CFC2A9;
+        background: radial-gradient(circle, #CFC2A9 3px, transparent 3.5px);
+        transform: rotate(-8deg);
+    }
+
+/* ---------- Blazor framework bits ---------- */
+
 .valid.modified:not([type=checkbox]) {
-    outline: 1px solid #26b050;
+    outline: 1px solid var(--token-green);
 }
 
 .invalid {
-    outline: 1px solid #e50000;
+    outline: 1px solid var(--token-red);
 }
 
 .validation-message {
-    color: #e50000;
+    color: var(--token-red);
 }
 
 .blazor-error-boundary {
