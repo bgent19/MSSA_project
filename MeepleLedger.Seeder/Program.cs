@@ -1,6 +1,7 @@
 ﻿
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Xml.Linq;
 
 // Set working directory to solution root
@@ -69,23 +70,25 @@ List<int> ownedIds = XDocument.Parse(collectionResult)
 
 Console.WriteLine($"Owned games: {ownedIds.Count}");
 
-var lines = File.ReadAllLines("data/boardgames_ranks.csv");
-var header = lines[0].Split(',');
+var lines = File.ReadAllLines("data/boardgames_ranks.csv", Encoding.UTF8);
+var header = SplitCsvLine(lines[0]);
 
 var idCol = Array.IndexOf(header, "id");
 var rankCol = Array.IndexOf(header, "rank");
 var expansionCol = Array.IndexOf(header, "is_expansion");
 
 var rankdIds = new List<(int Id, int Rank)>();
+int misaligned = 0;
 
 foreach (var line in lines.Skip(1))
 {
-    var fields = line.Split(',');
+    var fields = SplitCsvLine(line);
 
-    // Bug: Some titles contain commas
-    // Resolution: Skip those games
+    // Guard: a misaligned row reads the wrong columns, so skip it rather than guess.
+    // With quoted commas handled this should fire on approximately nothing.
     if(fields.Length != header.Length)
     {
+        misaligned++;
         continue;
     }
 
@@ -118,6 +121,8 @@ foreach (var line in lines.Skip(1))
 
 var rankedInOrder = rankdIds.OrderBy(r => r.Rank).Select(r => r.Id).ToList();
 Console.WriteLine($"Ranked base games in CSV: {rankedInOrder.Count}");
+// If this is not near zero, the split is still wrong
+Console.WriteLine($"Rows skipped as misaligned: {misaligned}");
 
 // Check my collection and add any games I own not in the Top
 var allIds = new List<int>(ownedIds);
@@ -576,5 +581,52 @@ static void EmitLog()
     Console.WriteLine($"wrote MeepleLedger/Data/LogSeed.cs ({plays.Count} plays, {unownedPlays} of games not owned)");
 }
 
+
+// Split one CSV line on commas, except commas inside double quotes.
+// "Air, Land, & Sea" stays one field, and "" inside quotes is a literal quote.
+static string[] SplitCsvLine(string line)
+{
+    var fields = new List<string>();
+    var field = new StringBuilder();
+    bool inQuotes = false;
+
+    for (int i = 0; i < line.Length; i++)
+    {
+        char c = line[i];
+
+        if (inQuotes)
+        {
+            if (c == '"' && i + 1 < line.Length && line[i + 1] == '"')
+            {
+                field.Append('"');
+                i++;
+            }
+            else if (c == '"')
+            {
+                inQuotes = false;
+            }
+            else
+            {
+                field.Append(c);
+            }
+        }
+        else if (c == '"')
+        {
+            inQuotes = true;
+        }
+        else if (c == ',')
+        {
+            fields.Add(field.ToString());
+            field.Clear();
+        }
+        else
+        {
+            field.Append(c);
+        }
+    }
+
+    fields.Add(field.ToString());
+    return fields.ToArray();
+}
 
 static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
