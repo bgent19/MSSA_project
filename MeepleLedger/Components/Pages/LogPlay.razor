@@ -1,10 +1,18 @@
 ﻿@page "/log"
+@page "/plays/{Id:guid}/edit"
 @rendermode InteractiveServer
 @inject IMeepleStore Store
+@inject NavigationManager Nav
 
-<PageTitle>Log a Play</PageTitle>
+<PageTitle>@Heading</PageTitle>
 
-<h1>Log a Play</h1>
+<h1>@Heading</h1>
+
+@if (IsEditing && _editing is null)
+{
+    <p>No play in your log has that id. <a href="plays">Back to the Play Log</a></p>
+    return;
+}
 
 @if (_game is null)
 {
@@ -65,10 +73,17 @@ else
     <div class="alert alert-success">@_confirmation</div>
 }
 
-<button class="btn btn-primary mb-3" @onclick="Submit">Log it</button>
+<button class="btn btn-primary mb-3" @onclick="Submit">@(IsEditing ? "Save changes" : "Log it")</button>
+@if (IsEditing)
+{
+    <a class="btn btn-outline-secondary mb-3 ms-2" href="plays">Cancel</a>
+}
 
 
 @code {
+    [Parameter] public Guid? Id { get; set; }
+
+    private Play? _editing;
     private Game? _game;
     private DateTime _date = DateTime.Today;
     private int? _duration;
@@ -77,7 +92,30 @@ else
     private string? _error;
     private string? _confirmation;
 
-    protected override void OnInitialized() => ResetForm();
+    private bool IsEditing => Id is not null;
+    private string Heading => IsEditing ? "Edit Play" : "Log a Play";
+
+    protected override void OnParametersSet()
+    {
+        _editing = Id is Guid id ? Store.PlayLog.Get(id) : null;
+
+        if (_editing is null)
+            ResetForm();
+        else
+            LoadForm(_editing);
+    }
+
+    // Copy the results so the form edits a draft, not the play stored in the log.
+    private void LoadForm(Play play)
+    {
+        _game = play.Game;
+        _date = play.PlayedOn;
+        _duration = play.DurationMinutes;
+        _location = play.Location;
+        _results = [.. play.Results
+            .OrderByDescending(r => r.PlayerName == Store.PlayLog.OwnerName)
+            .Select(r => new PlayerResult { PlayerName = r.PlayerName, Score = r.Score, IsWinner = r.IsWinner })];
+    }
 
     private void ResetForm()
     {
@@ -107,8 +145,14 @@ else
 
         try
         {
-            var play = new Play(_game, _date, results, _duration, _location);
-            Store.PlayLog.Record(play);
+            if (_editing is null)
+            {
+                Store.PlayLog.Record(new Play(_game, _date, results, _duration, _location));
+            }
+            else
+            {
+                Store.PlayLog.Replace(new Play(_game, _date, results, _duration, _location) { Id = _editing.Id });
+            }
         }
         catch (ArgumentOutOfRangeException)
         {
@@ -118,6 +162,12 @@ else
         catch(InvalidOperationException ex)
         {
             _error = ex.Message;
+            return;
+        }
+
+        if (_editing is not null)
+        {
+            Nav.NavigateTo("plays");
             return;
         }
 

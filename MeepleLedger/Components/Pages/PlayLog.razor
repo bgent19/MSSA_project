@@ -38,6 +38,7 @@ else
                 <th>Date</th>
                 <th>Game</th>
                 <th>Players</th>
+                <th></th>
             </tr>
         </thead>
         <tbody>
@@ -53,6 +54,18 @@ else
                         }
                     </td>
                     <td>@Player(play)</td>
+                    <td class="text-end text-nowrap">
+                        @if (_pendingDelete == play)
+                        {
+                            <button class="btn btn-sm btn-danger" @onclick="() => Delete(play)">confirm delete</button>
+                            <button class="btn btn-sm btn-link" @onclick="() => _pendingDelete = null">cancel</button>
+                        }
+                        else
+                        {
+                            <a class="btn btn-sm btn-outline-secondary" href="plays/@play.Id/edit">edit</a>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => _pendingDelete = play">delete</button>
+                        }
+                    </td>
                 </tr>
             }
         </tbody>
@@ -62,6 +75,7 @@ else
 @code {
     private string _gameName = "";
     private bool _notOwnedOnly;
+    private Play? _pendingDelete;
 
     private IReadOnlyList<Play> Rows
     {
@@ -75,6 +89,16 @@ else
 
             return [.. plays];
         }
+    }
+
+    private void Delete(Play play)
+    {
+        Store.PlayLog.Remove(play.Id);
+        _pendingDelete = null;
+
+        // Deleting the last play of the filtered game drops it from the dropdown, so clear the filter.
+        if (!Store.PlayLog.GamesPlayed().Any(g => g.Name == _gameName))
+            _gameName = "";
     }
 
     private static string Player(Play p) =>
