@@ -6,37 +6,76 @@
 
 <h1>Play Log</h1>
 
+<div class="row g-2 mb-3 align-items-center">
+    <div class="col-md-8">
+        <select class="form-select" @bind="_gameName">
+            <option value="">All games</option>
+            @foreach (var game in Store.PlayLog.GamesPlayed())
+            {
+                <option value="@game.Name">@game.Name</option>
+            }
+        </select>
+    </div>
+    <div class="col-md-4">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="not-owned-only" @bind="_notOwnedOnly" />
+            <label class="form-check-label" for="not-owned-only">Only games I don't own</label>
+        </div>
+    </div>
+</div>
+
 <p class="text-muted">@Rows.Count plays, most recent first</p>
 
-
-<table class="table table-striped">
-    <thead>
-        <tr>
-            <th>Date</th>
-            <th>Game</th>
-            <th>Players</th>
-        </tr>
-    </thead>
-    <tbody>
-        @foreach (var play in Rows)
-        {
-            <tr @key="play">
-                <td>@play.PlayedOn.ToString("d")</td>
-                <td>
-                    @play.Game.Name
-                    @if (!Store.Collection.Owns(play.Game.Name))
-                    {
-                        <span class="badge text-bg-warning fs-6 ms-2">not owned</span>
-                    }
-                </td>
-                <td>@Player(play)</td>
+@if (Rows.Count == 0)
+{
+    <p>No plays match</p>
+}
+else
+{
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Game</th>
+                <th>Players</th>
             </tr>
-        }
-    </tbody>
-</table>
+        </thead>
+        <tbody>
+            @foreach (var play in Rows)
+            {
+                <tr @key="play">
+                    <td>@play.PlayedOn.ToString("d")</td>
+                    <td>
+                        @play.Game.Name
+                        @if (!Store.Collection.Owns(play.Game.Name))
+                        {
+                            <span class="badge text-bg-warning fs-6 ms-2">not owned</span>
+                        }
+                    </td>
+                    <td>@Player(play)</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
 
 @code {
-    private IReadOnlyList<Play> Rows => [.. Store.PlayLog.RecentFirst()];
+    private string _gameName = "";
+    private bool _notOwnedOnly;
+
+    private IReadOnlyList<Play> Rows
+    {
+        get
+        {
+            var game = Store.PlayLog.GamesPlayed().FirstOrDefault(g => g.Name == _gameName);
+            var plays = game is null ? Store.PlayLog.RecentFirst() : Store.PlayLog.ForGame(game);
+
+            if (_notOwnedOnly)
+                plays = plays.Where(p => !Store.Collection.Owns(p.Game.Name));
+
+            return [.. plays];
+        }
+    }
 
     private static string Player(Play p) =>
         string.Join(", ", p.Results.Select(r => r.IsWinner ? $"{r.PlayerName} 🏆" : r.PlayerName));
