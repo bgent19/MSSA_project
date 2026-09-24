@@ -1,0 +1,79 @@
+@page "/stats"
+@inject IMeepleStore Store
+
+<PageTitle>Statistics</PageTitle>
+
+<h1>Statistics</h1>
+
+<div class="row g-3 mb-4">
+    <div class="col-sm-6">
+        <div class="card text-center">
+            <div class="card-body">
+                <div class="display-5">@Store.Collection.TotalGames</div>
+                <div class="text-muted">games owned</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-sm-6">
+        <div class="card text-center">
+            <div class="card-body">
+                <div class="display-5">@TotalPlays</div>
+                <div class="text-muted">plays logged</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h2 class="h4">Most played</h2>
+
+@if (MostPlayed.Count == 0)
+{
+    <p>No plays logged yet</p>
+}
+else
+{
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Game</th>
+                <th>Plays</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var game in MostPlayed)
+            {
+                <tr>
+                    <td>@game.Name</td>
+                    <td>@Store.PlayLog.ForGame(game).Count()</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<h2 class="h4">Played but not owned</h2>
+
+@if (PlayedNotOwned.Count == 0)
+{
+    <p>Every game you've played is in your collection</p>
+}
+else
+{
+    <ul>
+        @foreach (var game in PlayedNotOwned)
+        {
+            <li>@game.Name</li>
+        }
+    </ul>
+}
+
+@code {
+    private const int TopCount = 5;
+
+    private int TotalPlays => Store.PlayLog.RecentFirst().Count();
+
+    private IReadOnlyList<Game> MostPlayed => [.. Store.PlayLog.MostPlayed().Take(TopCount)];
+
+    private IReadOnlyList<Game> PlayedNotOwned =>
+        [.. Store.PlayLog.MostPlayed().Where(g => !Store.Collection.Owns(g.Name))];
+}
