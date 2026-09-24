@@ -46,7 +46,7 @@ else
             {
                 var game = owned.Game;
                 <tr @key="game">
-                    <td class="text-truncate" style="max-width: 20rem">@game.Name</td>
+                    <td class="text-truncate" style="max-width: 20rem"><a href="games/@Uri.EscapeDataString(game.Name)">@game.Name</a></td>
                     <td class="text-truncate" style="max-width: 14rem">@game.Designer</td>
                     <td>@PlayerRange(game)</td>
                     <td>@game.PlaytimeMinutes min</td>

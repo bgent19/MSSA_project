@@ -1,0 +1,129 @@
+@page "/games/{*Name}"
+@inject IMeepleStore Store
+@inject IGameCatalogSource CatalogSource
+
+<PageTitle>@(_game?.Name ?? "Game not found")</PageTitle>
+
+@if (_game is null)
+{
+    <h1>Game not found</h1>
+    <p>No game in the catalog is called "@Name".</p>
+}
+else
+{
+    <h1>
+        @_game.Name
+        @if (_owned is null)
+        {
+            <span class="badge text-bg-warning fs-6 ms-2 align-middle">not owned</span>
+        }
+        else
+        {
+            <span class="badge text-bg-success fs-6 ms-2 align-middle">owned</span>
+        }
+    </h1>
+
+    <dl class="row">
+        <dt class="col-sm-3">Designer</dt>
+        <dd class="col-sm-9">@(_game.Designer ?? "Unknown")</dd>
+
+        <dt class="col-sm-3">Players</dt>
+        <dd class="col-sm-9">@PlayerRange(_game)</dd>
+
+        <dt class="col-sm-3">Playtime</dt>
+        <dd class="col-sm-9">@_game.PlaytimeMinutes min</dd>
+
+        @if (_owned is not null)
+        {
+            <dt class="col-sm-3">Acquired</dt>
+            <dd class="col-sm-9">@_owned.DateAcquired.ToString("d")</dd>
+
+            <dt class="col-sm-3">Condition</dt>
+            <dd class="col-sm-9">@_owned.Condition</dd>
+
+            @if (!string.IsNullOrWhiteSpace(_owned.Notes))
+            {
+                <dt class="col-sm-3">Notes</dt>
+                <dd class="col-sm-9">@_owned.Notes</dd>
+            }
+        }
+    </dl>
+
+    <div class="card text-center mb-4" style="max-width: 20rem">
+        <div class="card-body">
+            @if (_record.Rate is double rate)
+            {
+                <div class="display-5">@rate.ToString("P0")</div>
+                <div class="text-muted">win rate: @_record.Wins of @_record.Plays plays</div>
+            }
+            else
+            {
+                <div class="display-5">—</div>
+                <div class="text-muted">no plays logged yet</div>
+            }
+        </div>
+    </div>
+
+    <h2 class="h4">Plays</h2>
+
+    @if (_plays.Count == 0)
+    {
+        <p>You haven't logged a play of this game</p>
+    }
+    else
+    {
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Players</th>
+                    <th>Duration</th>
+                    <th>Location</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var play in _plays)
+                {
+                    <tr @key="play">
+                        <td>@play.PlayedOn.ToString("d")</td>
+                        <td>@Players(play)</td>
+                        <td>@(play.DurationMinutes is int m ? $"{m} min" : "")</td>
+                        <td>@play.Location</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@code {
+    [Parameter] public string Name { get; set; } = "";
+
+    private Game? _game;
+    private OwnedGame? _owned;
+    private IReadOnlyList<Play> _plays = [];
+    private WinRecord _record = new(0, 0);
+
+    protected override void OnParametersSet()
+    {
+        _game = CatalogSource.Catalog.Games.FirstOrDefault(g => g.Name == Name);
+        if (_game is null)
+            return;
+
+        _owned = Store.Collection.Get(_game.Name);
+        _plays = [.. Store.PlayLog.ForGame(_game)];
+        _record = Store.PlayLog.WinRecordFor(_game);
+    }
+
+    private static string PlayerRange(Game g) =>
+        g.MinPlayers == g.MaxPlayers ? $"{g.MinPlayers}" : $"{g.MinPlayers}-{g.MaxPlayers}";
+
+    private static string Players(Play p) =>
+        string.Join(", ", p.Results.Select(PlayerLabel));
+
+    private static string PlayerLabel(PlayerResult r)
+    {
+        var label = r.Score is int s ? $"{r.PlayerName} ({s})" : r.PlayerName;
+        return r.IsWinner ? $"{label} 🏆" : label;
+    }
+}
