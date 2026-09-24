@@ -17,7 +17,12 @@
 
         public IEnumerable<Play> ForGame(Game g)
         {
-            return _plays.Where(p => p.Game == g);
+            return RecentFirst().Where(p => p.Game == g);
+        }
+
+        public IEnumerable<Game> GamesPlayed()
+        {
+            return _plays.Select(p => p.Game).Distinct().OrderBy(g => g.Name);
         }
 
         public IEnumerable<Play> RecentFirst()
