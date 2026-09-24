@@ -46,7 +46,7 @@ else
                 <tr @key="play">
                     <td>@play.PlayedOn.ToString("d")</td>
                     <td>
-                        @play.Game.Name
+                        <a href="games/@Uri.EscapeDataString(play.Game.Name)">@play.Game.Name</a>
                         @if (!Store.Collection.Owns(play.Game.Name))
                         {
                             <span class="badge text-bg-warning fs-6 ms-2">not owned</span>

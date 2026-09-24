@@ -30,6 +30,12 @@
             return _plays.OrderByDescending(static p => p.PlayedOn);
         }
 
+        public WinRecord WinRecordFor(Game g)
+        {
+            var plays = ForGame(g).ToList();
+            return new WinRecord(plays.Count(p => p.IsWonBy(OwnerName)), plays.Count);
+        }
+
         public IEnumerable<Game> MostPlayed()
         {
             return _plays.GroupBy(p => p.Game).OrderByDescending(g => g.Count()).Select(g => g.Key);

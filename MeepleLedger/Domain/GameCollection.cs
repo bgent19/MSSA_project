@@ -27,6 +27,8 @@
 
         public bool Owns(string title) => _games.ContainsKey(title);
 
+        public OwnedGame? Get(string title) => _games.GetValueOrDefault(title);
+
         public IEnumerable<OwnedGame> Search(string term)
         {
             return [.. _games.Values.Where(og => og.Game.Search(term))];

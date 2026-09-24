@@ -11,6 +11,8 @@
         public IEnumerable<PlayerResult> Winners => Results.Where(r => r.IsWinner);
         public bool HasWinner => Winners.Any();
 
+        public bool IsWonBy(string playerName) => Winners.Any(r => r.PlayerName == playerName);
+
         public Play(Game g, DateTime d, List<PlayerResult> r, int? durationMinutes = null, string? location = null)
         {
             Game = g;
