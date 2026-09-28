@@ -141,3 +141,17 @@ It reads that XML and writes three C# files into [MeepleLedger/Data/](MeepleLedg
 **Commit your work before running an emit.** These three files are real source code in the web
 project, and the emit overwrites them. If a generated file doesn't compile, the fix is to throw it
 away with git and emit again — which only works if everything else was already committed.
+
+### Step 3: embed
+
+```
+dotnet run --project MeepleLedger.Seeder -- embed
+```
+
+This step needs step 2 to have written `data/blurbs.json`, the `raw/` XML from step 1, and the
+`AzureOpenAI:Endpoint`, `AzureOpenAI:Key` and `AzureOpenAI:EmbeddingDeployment` user secrets.
+
+It turns each game's name, categories, mechanics and Blurb into a vector, 20 games per request, and
+writes them to `data/vectors.json` (about 6 MB, ignored by git). Running it again only embeds games
+whose text has changed, so it is cheap to re-run. At the end it prints the tokens used and a cost
+estimate — the whole catalog should cost well under one cent.
