@@ -3,8 +3,8 @@
 A Blazor Server web app for tracking a board game collection and the plays logged against it. The
 game data comes from real [BoardGameGeek](https://boardgamegeek.com) (BGG) data.
 
-The focus of the mini project is the `MeepleLedger.Seeder` project as well as the class design in
-[MeepleLedger/Domain](MeepleLedger/Domain).
+The focus of the mini project is the class design in [MeepleLedger/Domain](MeepleLedger/Domain) and
+the `MeepleLedger.Seeder` project that produces the app's data.
 
 You need the .NET 10 SDK to build and run this.
 
@@ -12,9 +12,13 @@ You need the .NET 10 SDK to build and run this.
 
 | Path | What it is |
 |---|---|
-| [MeepleLedger/](MeepleLedger/) | The web app. `Domain/` has the classes. `Data/` has the game data. |
+| [MeepleLedger/](MeepleLedger/) | The web app. `Domain/` has the classes, `Storage/` connects them to the app, `Data/` has the game data, `Components/` has the pages. |
+| [MeepleLedger.Tests/](MeepleLedger.Tests/) | xUnit tests for the domain rules. |
 | [MeepleLedger.Seeder/](MeepleLedger.Seeder/) | A separate console app that creates the files in `MeepleLedger/Data/`. |
-| `raw/`, `data/` | Working files. Git ignores both, so they are empty after a fresh clone. |
+| [presentation/](presentation/) | HTML slides for the project presentation. |
+| `raw/`, `data/` | Working files for the seeder. Git ignores both, so they are empty after a fresh clone. |
+
+`MSSA_project.slnx` ties the three projects together.
 
 ## Running the app
 
@@ -22,11 +26,67 @@ You need the .NET 10 SDK to build and run this.
 dotnet run --project MeepleLedger
 ```
 
-NOTE: This app currently does nothing. This is the future work for this project.
+Then open the URL it prints. The app gets its games from the three files in `MeepleLedger/Data/`.
+Those files are committed to the repo, so the app runs right after a clone. You only need the seeder
+below if you want to regenerate them.
 
-The app gets its games from the three files in `MeepleLedger/Data/`. Those files are committed to
-the repo, so the app runs right after a clone. You only need the seeder below if you want to
-regenerate them.
+### What you can do
+
+| Page | Route | What it does |
+|---|---|---|
+| Collection | `/` | Lists the games you own. Search by title or designer, filter by player count. |
+| Add a Game | `/collection/add` | Pick a game from the catalog and add it with its condition and date acquired. A game you already own is refused. |
+| Game detail | `/games/{name}` | One game's details, its plays, and your win rate for it. |
+| Log a Play | `/log` | Record a session: pick any catalog game (owned or not), then the date, players, scores, winners, duration and location. |
+| Edit a Play | `/plays/{id}/edit` | The same form, filled in with an existing play. |
+| Play Log | `/plays` | Every play, newest first. Filter by game or to games you don't own. Edit or delete a play. |
+| Statistics | `/stats` | Games owned and plays logged, most played games, and games played but not owned. |
+
+**Changes are not saved.** The app keeps everything in memory and starts over from the seed data
+each time it launches, so anything you add, edit or delete is gone when the app stops.
+
+## How it's built
+
+### Domain
+
+The classes in [MeepleLedger/Domain](MeepleLedger/Domain) hold the rules. The pages call them
+rather than enforcing anything themselves.
+
+- `Game` — a catalog entry: name, designer, player count range, play time.
+- `GameCatalog` — every game the app knows about (about 200), with search and player-count lookup.
+- `OwnedGame` / `GameCollection` — the games you own, keyed by title. **You can't own the same
+  title twice.**
+- `Play` / `PlayerResult` — one session, and each player's score and whether they won. **A play
+  can't have more results than the game's max players.**
+- `PlayLog` — every play, belonging to one owner. **Every play must include the owner as a
+  player**, both when recorded and when edited. It also answers most played, games played, and
+  per-game win records.
+- `WinRecord` — wins over plays for one game. Its rate is empty, not zero, for a game never played.
+
+The log and the collection are separate: you can log a game you don't own, and deleting a play never
+touches the collection.
+
+### Storage
+
+[MeepleLedger/Storage](MeepleLedger/Storage) sits between the domain and the pages. Pages only see
+two interfaces, registered as singletons in `Program.cs`:
+
+- `IGameCatalogSource` — implemented by `SeededCatalogSource`, which reads `CatalogSeed`.
+- `IMeepleStore` — implemented by `InMemoryMeepleStore`, which builds the collection and play log
+  from `CollectionSeed` and `LogSeed`.
+
+The store is created at startup, so bad seed data fails the launch instead of the first page load.
+Adding real persistence means writing a new `IMeepleStore`; the pages don't change.
+
+## Running the tests
+
+```
+dotnet test
+```
+
+The tests in [MeepleLedger.Tests](MeepleLedger.Tests/) check the domain rules above: a duplicate
+title is refused, a play can't exceed max players, a play without the owner can't be recorded or
+edited in, an edit replaces the right play, and removing a play leaves the collection alone.
 
 ## Running the seeder
 
