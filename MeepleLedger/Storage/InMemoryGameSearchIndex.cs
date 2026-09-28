@@ -37,6 +37,9 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
         _store = store;
     }
 
+    // Word matching only: there are no Blurbs and no embeddings here.
+    public bool UnderstandsMeaning => false;
+
     public Task<IReadOnlyList<Recommendation>> RecommendAsync(Ask ask, Table table, int maxResults)
     {
         if (ask == null)

@@ -41,6 +41,7 @@ below if you want to regenerate them.
 | Edit a Play | `/plays/{id}/edit` | The same form, filled in with an existing play. |
 | Play Log | `/plays` | Every play, newest first. Filter by game or to games you don't own. Edit or delete a play. |
 | Statistics | `/stats` | Games owned and plays logged, most played games, and games played but not owned. |
+| Tonight | `/tonight` | Type an Ask ("something co-operative with cards"), set players, minutes and owned-only, and get ranked Recommendations with the reason for each. Offline it matches words, not meaning, and says so. |
 
 **Changes are not saved.** The app keeps everything in memory and starts over from the seed data
 each time it launches, so anything you add, edit or delete is gone when the app stops.

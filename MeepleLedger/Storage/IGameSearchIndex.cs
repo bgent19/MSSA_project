@@ -18,4 +18,9 @@ namespace MeepleLedger.Storage;
 public interface IGameSearchIndex
 {
     Task<IReadOnlyList<Recommendation>> RecommendAsync(Ask ask, Table table, int maxResults);
+
+    // True when this Search Index can match an Ask by meaning (e.g. against embedded Blurbs),
+    // false when it can only match the words of the Ask. Screens read this to describe the
+    // results honestly. It says what the index can do, never which Provider is live (ADR-0001).
+    bool UnderstandsMeaning { get; }
 }
