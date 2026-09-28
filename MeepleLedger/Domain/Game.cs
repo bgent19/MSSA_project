@@ -7,6 +7,14 @@
         public int MinPlayers { get; set; }
         public int MaxPlayers { get; set; }
         public int PlaytimeMinutes { get; set; }
+        public List<string> Categories { get; set; } = [];
+        public List<string> Mechanics { get; set; } = [];
+
+        // BGG average weight, 1 (light) to 5 (heavy). Null means unrated, not light.
+        public double? Weight { get; set; }
+
+        // Prose description. Not in the compiled seed (ADR-0003), so null in the in-memory provider.
+        public string? Blurb { get; set; }
 
         public bool Search(string term)
         {
