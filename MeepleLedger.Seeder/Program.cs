@@ -2,6 +2,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -27,6 +28,11 @@ if(args.FirstOrDefault() == "emit")
 if (args.FirstOrDefault() == "smoke-embed")
 {
     return await SmokeEmbed();
+}
+
+if (args.FirstOrDefault() == "embed")
+{
+    return await Embed();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -645,26 +651,17 @@ static void EmitLog()
 // and prints how many dimensions came back. text-embedding-3-small should return 1536.
 static async Task<int> SmokeEmbed()
 {
-    IConfiguration config = new ConfigurationBuilder()
-        .AddUserSecrets<Program>()
-        .Build();
-
-    string? endpoint = config["AzureOpenAI:Endpoint"];
-    string? key = config["AzureOpenAI:Key"];
-    string? deployment = config["AzureOpenAI:EmbeddingDeployment"];
-
-    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(deployment))
+    EmbeddingSettings? settings = LoadEmbeddingSettings();
+    if (settings == null)
     {
-        Console.WriteLine("Missing user secrets. Set AzureOpenAI:Endpoint, AzureOpenAI:Key and AzureOpenAI:EmbeddingDeployment");
-        Console.WriteLine("with: dotnet user-secrets set <name> <value> --project MeepleLedger.Seeder");
         return 1;
     }
 
-    // The deployment name goes in the URL, so the app never refers to the model id directly.
-    string url = endpoint.TrimEnd('/') + "/openai/deployments/" + deployment + "/embeddings?api-version=2024-10-21";
+    string url = settings.Url;
+    string deployment = settings.Deployment;
 
     HttpClient http = new();
-    http.DefaultRequestHeaders.Add("api-key", key);
+    http.DefaultRequestHeaders.Add("api-key", settings.Key);
 
     string body = JsonSerializer.Serialize(new { input = "a quick co-op game for three players" });
     var response = await http.PostAsync(url, new StringContent(body, Encoding.UTF8, "application/json"));
@@ -687,6 +684,273 @@ static async Task<int> SmokeEmbed()
     Console.WriteLine($"dimensions: {dimensions}");
     Console.WriteLine($"tokens used: {tokens}");
     return 0;
+}
+
+// Reads the Azure OpenAI endpoint, key and deployment name from .NET user secrets.
+// Returns null (after printing how to fix it) if any of them is missing.
+static EmbeddingSettings? LoadEmbeddingSettings()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["AzureOpenAI:Endpoint"];
+    string? key = config["AzureOpenAI:Key"];
+    string? deployment = config["AzureOpenAI:EmbeddingDeployment"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(deployment))
+    {
+        Console.WriteLine("Missing user secrets. Set AzureOpenAI:Endpoint, AzureOpenAI:Key and AzureOpenAI:EmbeddingDeployment");
+        Console.WriteLine("with: dotnet user-secrets set <name> <value> --project MeepleLedger.Seeder");
+        return null;
+    }
+
+    // The deployment name goes in the URL, so the app never refers to the model id directly.
+    string url = endpoint.TrimEnd('/') + "/openai/deployments/" + deployment + "/embeddings?api-version=2024-10-21";
+
+    return new EmbeddingSettings { Url = url, Key = key, Deployment = deployment };
+}
+
+// Turns every Blurb in data/blurbs.json into a vector and writes them to data/vectors.json (A-05).
+// Like fetch, this is the slow, metered step, so it runs once and the file is reused by every Provider.
+static async Task<int> Embed()
+{
+    string blurbFile = "data/blurbs.json";
+    string vectorFile = "data/vectors.json";
+    int batchSize = 20;
+
+    // text-embedding-3-small list price: $0.02 per 1M tokens
+    double dollarsPerMillionTokens = 0.02;
+
+    if (!File.Exists(blurbFile))
+    {
+        Console.WriteLine($"{blurbFile} not found. Run the emit step first.");
+        return 1;
+    }
+
+    var blurbs = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(blurbFile))!;
+
+    // Categories and mechanics are not in blurbs.json, so read them from the same raw XML emit uses
+    var categoriesByName = new Dictionary<string, List<string>>();
+    var mechanicsByName = new Dictionary<string, List<string>>();
+
+    foreach (var batchFile in Directory.GetFiles("raw", "thing-batch-*.xml"))
+    {
+        foreach (var item in XDocument.Load(batchFile).Root!.Elements("item"))
+        {
+            string name = item.Elements("name")
+                              .First(n => (string?)n.Attribute("type") == "primary")
+                              .Attribute("value")!.Value;
+
+            categoriesByName[name] = LinkValues(item, "boardgamecategory");
+            mechanicsByName[name] = LinkValues(item, "boardgamemechanic");
+        }
+    }
+
+    // Load what a previous run already embedded, so we can resume
+    var vectors = new Dictionary<string, GameVector>();
+    if (File.Exists(vectorFile))
+    {
+        vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
+    }
+
+    // Work out which games still need a vector
+    var namesToEmbed = new List<string>();
+    var textsToEmbed = new List<string>();
+    var hashesToEmbed = new List<string>();
+    int alreadyDone = 0;
+
+    foreach (var pair in blurbs)
+    {
+        string name = pair.Key;
+
+        List<string> categories = [];
+        if (categoriesByName.ContainsKey(name))
+        {
+            categories = categoriesByName[name];
+        }
+
+        List<string> mechanics = [];
+        if (mechanicsByName.ContainsKey(name))
+        {
+            mechanics = mechanicsByName[name];
+        }
+
+        string text = BuildEmbeddingText(name, categories, mechanics, pair.Value);
+        string hash = HashText(text);
+
+        // Resume is keyed on the hash of the text, not the name, so a changed Blurb gets re-embedded
+        if (vectors.ContainsKey(name) && vectors[name].Hash == hash)
+        {
+            alreadyDone++;
+            continue;
+        }
+
+        namesToEmbed.Add(name);
+        textsToEmbed.Add(text);
+        hashesToEmbed.Add(hash);
+    }
+
+    // Drop vectors for games that are no longer in blurbs.json
+    int removed = 0;
+    foreach (var name in vectors.Keys.ToList())
+    {
+        if (!blurbs.ContainsKey(name))
+        {
+            vectors.Remove(name);
+            removed++;
+        }
+    }
+
+    Console.WriteLine($"{blurbs.Count} blurbs, {alreadyDone} already embedded, {namesToEmbed.Count} to embed");
+    if (removed > 0)
+    {
+        Console.WriteLine($"removed {removed} vectors for games no longer in {blurbFile}");
+    }
+
+    int totalTokens = 0;
+
+    if (namesToEmbed.Count > 0)
+    {
+        EmbeddingSettings? settings = LoadEmbeddingSettings();
+        if (settings == null)
+        {
+            return 1;
+        }
+
+        HttpClient http = new();
+        http.DefaultRequestHeaders.Add("api-key", settings.Key);
+
+        int batchCount = (int)Math.Ceiling(namesToEmbed.Count / (double)batchSize);
+
+        for (int b = 0; b < batchCount; b++)
+        {
+            int start = b * batchSize;
+            int count = Math.Min(batchSize, namesToEmbed.Count - start);
+            List<string> batchTexts = textsToEmbed.GetRange(start, count);
+
+            Console.WriteLine($"[{b + 1}/{batchCount}] embedding {count} games...");
+
+            string? responseText = await PostWithRetry(http, settings.Url, batchTexts);
+            if (responseText == null)
+            {
+                Console.WriteLine("Stopped. Vectors saved so far are kept; run again to resume.");
+                return 1;
+            }
+
+            // Response shape: { "data": [ { "index": i, "embedding": [...] } ], "usage": { "total_tokens": n } }
+            using JsonDocument json = JsonDocument.Parse(responseText);
+
+            foreach (JsonElement row in json.RootElement.GetProperty("data").EnumerateArray())
+            {
+                // "index" is the position in the batch we sent, so use it rather than trusting the order
+                int index = row.GetProperty("index").GetInt32();
+                JsonElement embedding = row.GetProperty("embedding");
+
+                float[] vector = new float[embedding.GetArrayLength()];
+                int i = 0;
+                foreach (JsonElement number in embedding.EnumerateArray())
+                {
+                    vector[i] = number.GetSingle();
+                    i++;
+                }
+
+                string name = namesToEmbed[start + index];
+                vectors[name] = new GameVector { Hash = hashesToEmbed[start + index], Vector = vector };
+            }
+
+            totalTokens += json.RootElement.GetProperty("usage").GetProperty("total_tokens").GetInt32();
+
+            // Save after every batch, so a crash or a Ctrl+C loses at most one batch
+            File.WriteAllText(vectorFile, JsonSerializer.Serialize(vectors));
+        }
+    }
+    else
+    {
+        // Still write the file, in case games were removed above
+        File.WriteAllText(vectorFile, JsonSerializer.Serialize(vectors));
+    }
+
+    double cost = totalTokens * dollarsPerMillionTokens / 1_000_000;
+
+    Console.WriteLine();
+    Console.WriteLine($"wrote {vectorFile} ({vectors.Count} vectors)");
+    Console.WriteLine($"tokens used this run: {totalTokens}");
+    Console.WriteLine($"estimated cost: ${cost.ToString("0.000000", CultureInfo.InvariantCulture)}");
+
+    // 200 Blurbs should be well under a cent. More than that means something is looping.
+    if (cost >= 0.01)
+    {
+        Console.WriteLine("WARNING: cost is a cent or more. That is far more than 200 Blurbs should need.");
+    }
+
+    return 0;
+}
+
+// The text that gets embedded for one Game: name, categories and mechanics as well as the Blurb,
+// so a search for "deck building" can match on the mechanic even if the Blurb never says it.
+static string BuildEmbeddingText(string name, List<string> categories, List<string> mechanics, string blurb)
+{
+    var text = new StringBuilder();
+    text.AppendLine($"Name: {name}");
+    text.AppendLine($"Categories: {string.Join(", ", categories)}");
+    text.AppendLine($"Mechanics: {string.Join(", ", mechanics)}");
+    text.AppendLine();
+    text.Append(blurb);
+    return text.ToString();
+}
+
+static string HashText(string text)
+{
+    byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(text));
+    return Convert.ToHexString(hash);
+}
+
+// Sends one batch of texts to the embeddings endpoint. On a 429 it waits and tries again,
+// doubling the wait each time (or using Retry-After if the service sends it).
+// Returns the response body, or null if it gave up.
+static async Task<string?> PostWithRetry(HttpClient http, string url, List<string> texts)
+{
+    int maxAttempts = 6;
+    int waitSeconds = 2;
+
+    string body = JsonSerializer.Serialize(new { input = texts });
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+    {
+        var response = await http.PostAsync(url, new StringContent(body, Encoding.UTF8, "application/json"));
+        string responseText = await response.Content.ReadAsStringAsync();
+
+        if (response.IsSuccessStatusCode)
+        {
+            return responseText;
+        }
+
+        if (response.StatusCode != HttpStatusCode.TooManyRequests)
+        {
+            Console.WriteLine($"Request failed: {(int)response.StatusCode} {response.StatusCode}");
+            Console.WriteLine(responseText);
+            return null;
+        }
+
+        if (attempt == maxAttempts)
+        {
+            break;
+        }
+
+        int delay = waitSeconds;
+        if (response.Headers.RetryAfter?.Delta != null)
+        {
+            delay = (int)Math.Ceiling(response.Headers.RetryAfter.Delta.Value.TotalSeconds);
+        }
+
+        Console.WriteLine($"  429 Too Many Requests, waiting {delay}s (attempt {attempt}/{maxAttempts})");
+        await Task.Delay(delay * 1000);
+        waitSeconds *= 2;
+    }
+
+    Console.WriteLine($"Still getting 429 after {maxAttempts} attempts. Giving up.");
+    return null;
 }
 
 
@@ -738,3 +1002,19 @@ static string[] SplitCsvLine(string line)
 }
 
 static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+// Where to send embeddings requests, read from user secrets
+class EmbeddingSettings
+{
+    public string Url { get; set; } = "";
+    public string Key { get; set; } = "";
+    public string Deployment { get; set; } = "";
+}
+
+// One entry in data/vectors.json, keyed by Game name.
+// Hash is the SHA-256 of the text that was embedded, so a changed Blurb is spotted on the next run.
+class GameVector
+{
+    public string Hash { get; set; } = "";
+    public float[] Vector { get; set; } = [];
+}
