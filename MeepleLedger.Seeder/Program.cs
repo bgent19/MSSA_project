@@ -1,7 +1,10 @@
 ﻿
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Xml.Linq;
 
 // Set working directory to solution root
@@ -227,6 +230,10 @@ static void EmitCatalog()
     var files = Directory.GetFiles("raw", "thing-batch-*.xml");
     int dropped = 0;
     int parsed = 0;
+    int noWeight = 0;
+
+    var blurbFile = "data/blurbs.json";
+    var blurbs = new Dictionary<string, string>();
 
     foreach (var file in files)
     {
@@ -256,26 +263,72 @@ static void EmitCatalog()
 
             int playtimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value);
 
+            List<string> categories = LinkValues(item, "boardgamecategory");
+            List<string> mechanics = LinkValues(item, "boardgamemechanic");
+
+            // Absent on some items, "0" on others. Both mean nobody rated it, not that it is light
+            double? weight = null;
+            string? weightText = item.Element("statistics")?.Element("ratings")?
+                                     .Element("averageweight")?.Attribute("value")?.Value;
+            if (double.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) && w > 0)
+            {
+                weight = w;
+            }
+            else
+            {
+                noWeight++;
+            }
+
+            // XDocument already undid the XML layer (&#10;, &amp;). What is left is HTML (&mdash;, &quot;)
+            string blurb = WebUtility.HtmlDecode(item.Element("description")?.Value ?? "").Trim();
+            if (blurb.Length > 0)
+            {
+                if (!blurbs.TryAdd(name, blurb))
+                {
+                    Console.WriteLine($"duplicate name '{name}', kept the first blurb");
+                }
+            }
+
+            string weightField = weight == null ? "" : $", Weight = {weight.Value.ToString(CultureInfo.InvariantCulture)}";
+
             File.AppendAllText(fileName, "        " +
                                         $"new Game {{ Name = {Quote(name)}, " +
                                         $"Designer = {Quote(designer)}, " +
                                         $"MinPlayers = {minPlayers}, " +
                                         $"MaxPlayers = {maxPlayers}, " +
-                                        $"PlaytimeMinutes = {playtimeMinutes} }},{Environment.NewLine}");
+                                        $"PlaytimeMinutes = {playtimeMinutes}{weightField},{Environment.NewLine}" +
+                                        $"            Categories = [{string.Join(", ", categories.Select(Quote))}],{Environment.NewLine}" +
+                                        $"            Mechanics = [{string.Join(", ", mechanics.Select(Quote))}] }},{Environment.NewLine}");
         }
     }
 
-    string fileFooter = """     
+    string fileFooter = """
             ];
         }
         """;
     File.AppendAllText(fileName, fileFooter);
 
+    // Blurbs go to a gitignored data file, never into the compiled seed (ADR-0003)
+    Directory.CreateDirectory("data");
+    File.WriteAllText(blurbFile, JsonSerializer.Serialize(blurbs, new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    }));
+
 
     Console.WriteLine($"parsed {parsed} items from {files.Length} files");
     Console.WriteLine($"dropped {dropped} (maxplayers < 1)");
+    Console.WriteLine($"{noWeight} games have no weight rating");
     Console.WriteLine($"wrote MeepleLedger/Data/CatalogSeed.cs ({parsed - dropped} games)");
+    Console.WriteLine($"wrote {blurbFile} ({blurbs.Count} blurbs)");
 }
+
+static List<string> LinkValues(XElement item, string type) =>
+    item.Elements("link")
+        .Where(l => (string?)l.Attribute("type") == type)
+        .Select(l => l.Attribute("value")!.Value)
+        .ToList();
 
 static void EmitCollection()
 {
