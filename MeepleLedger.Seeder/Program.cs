@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Xml.Linq;
+using Microsoft.Extensions.Configuration;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -21,6 +22,11 @@ if(args.FirstOrDefault() == "emit")
     EmitCollection();
     EmitLog();
     return 0;
+}
+
+if (args.FirstOrDefault() == "smoke-embed")
+{
+    return await SmokeEmbed();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -632,6 +638,55 @@ static void EmitLog()
 
     int unownedPlays = plays.Count(p => !ownedNames.Contains(p.Name));
     Console.WriteLine($"wrote MeepleLedger/Data/LogSeed.cs ({plays.Count} plays, {unownedPlays} of games not owned)");
+}
+
+// One-off check that the embeddings deployment is reachable (A-04).
+// Reads the endpoint, key and deployment name from .NET user secrets, embeds one short Ask,
+// and prints how many dimensions came back. text-embedding-3-small should return 1536.
+static async Task<int> SmokeEmbed()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["AzureOpenAI:Endpoint"];
+    string? key = config["AzureOpenAI:Key"];
+    string? deployment = config["AzureOpenAI:EmbeddingDeployment"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(deployment))
+    {
+        Console.WriteLine("Missing user secrets. Set AzureOpenAI:Endpoint, AzureOpenAI:Key and AzureOpenAI:EmbeddingDeployment");
+        Console.WriteLine("with: dotnet user-secrets set <name> <value> --project MeepleLedger.Seeder");
+        return 1;
+    }
+
+    // The deployment name goes in the URL, so the app never refers to the model id directly.
+    string url = endpoint.TrimEnd('/') + "/openai/deployments/" + deployment + "/embeddings?api-version=2024-10-21";
+
+    HttpClient http = new();
+    http.DefaultRequestHeaders.Add("api-key", key);
+
+    string body = JsonSerializer.Serialize(new { input = "a quick co-op game for three players" });
+    var response = await http.PostAsync(url, new StringContent(body, Encoding.UTF8, "application/json"));
+    string responseText = await response.Content.ReadAsStringAsync();
+
+    if (!response.IsSuccessStatusCode)
+    {
+        Console.WriteLine($"Request failed: {(int)response.StatusCode} {response.StatusCode}");
+        Console.WriteLine(responseText);
+        return 1;
+    }
+
+    // Response shape: { "data": [ { "embedding": [ ...floats... ] } ], "usage": { "total_tokens": n } }
+    using JsonDocument json = JsonDocument.Parse(responseText);
+    JsonElement embedding = json.RootElement.GetProperty("data")[0].GetProperty("embedding");
+    int dimensions = embedding.GetArrayLength();
+    int tokens = json.RootElement.GetProperty("usage").GetProperty("total_tokens").GetInt32();
+
+    Console.WriteLine($"deployment: {deployment}");
+    Console.WriteLine($"dimensions: {dimensions}");
+    Console.WriteLine($"tokens used: {tokens}");
+    return 0;
 }
 
 
