@@ -9,6 +9,7 @@ builder.Services.AddRazorComponents()
 
 builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
 builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
+builder.Services.AddSingleton<IGameSearchIndex, InMemoryGameSearchIndex>();
 
 var app = builder.Build();
 
