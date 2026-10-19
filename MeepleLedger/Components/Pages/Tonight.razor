@@ -1,0 +1,116 @@
+@page "/tonight"
+@rendermode InteractiveServer
+@inject IGameSearchIndex SearchIndex
+@inject IMeepleStore Store
+
+<PageTitle>Tonight</PageTitle>
+
+<h1>What should we play tonight?</h1>
+<p class="page-lede">Say what you're in the mood for, set up the Table, and see what fits.</p>
+
+@if (!SearchIndex.UnderstandsMeaning)
+{
+    <div class="alert alert-info">
+        This search matches the words of your Ask against each game's name, categories and
+        mechanics. It does not understand what you mean, so "something cutthroat" only finds games
+        that literally use those words. Players and minutes are always respected.
+    </div>
+}
+
+<form @onsubmit="FindGames">
+    <div class="mb-3">
+        <label class="form-label" for="ask">Your Ask</label>
+        <input id="ask" class="form-control" @bind="_askText"
+               placeholder="e.g. something co-operative with cards" />
+    </div>
+
+    <div class="row g-2 mb-3 align-items-end">
+        <div class="col-md-3">
+            <label class="form-label" for="players">Players at the table</label>
+            <input id="players" type="number" class="form-control" min="1" @bind="_playerCount" />
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="minutes">Minutes available</label>
+            <input id="minutes" type="number" class="form-control" min="1" @bind="_minutesAvailable" />
+        </div>
+        <div class="col-md-4">
+            <div class="form-check mb-2">
+                <input id="owned-only" class="form-check-input" type="checkbox" @bind="_ownedOnly" />
+                <label class="form-check-label" for="owned-only">Only games on my shelf</label>
+            </div>
+        </div>
+        <div class="col-md-2">
+            <button type="submit" class="btn btn-primary w-100">Find games</button>
+        </div>
+    </div>
+</form>
+
+@if (_error != null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+
+@if (_recommendations != null)
+{
+    if (_recommendations.Count == 0)
+    {
+        <p class="empty-state">Nothing fits that Table. Try more minutes, or untick "Only games on my shelf".</p>
+    }
+    else
+    {
+        <ol class="list-group list-group-numbered">
+            @foreach (Recommendation recommendation in _recommendations)
+            {
+                <li class="list-group-item" @key="recommendation.Game.Name">
+                    <a href="games/@Uri.EscapeDataString(recommendation.Game.Name)">@recommendation.Game.Name</a>
+                    @if (!Store.Collection.Owns(recommendation.Game.Name))
+                    {
+                        <span class="badge text-bg-warning fs-6 ms-2">not owned</span>
+                    }
+                    <div class="text-muted small mt-1">@recommendation.Reason</div>
+                </li>
+            }
+        </ol>
+    }
+}
+
+@code {
+    private const int MaxRecommendations = 10;
+
+    private string _askText = "";
+    private int _playerCount = 3;
+    private int _minutesAvailable = 60;
+
+    // On by default: the common case is "what's on my shelf".
+    private bool _ownedOnly = true;
+
+    private IReadOnlyList<Recommendation>? _recommendations;
+    private string? _error;
+
+    private async Task FindGames()
+    {
+        _error = null;
+        _recommendations = null;
+
+        // The Ask and the Table enforce their own rules; this page only turns them into messages.
+        Ask ask;
+        Table table;
+        try
+        {
+            ask = new Ask(_askText);
+            table = new Table(_playerCount, _minutesAvailable, _ownedOnly);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            _error = "Players and minutes both need to be at least 1.";
+            return;
+        }
+        catch (ArgumentException)
+        {
+            _error = "Type what you're in the mood for first.";
+            return;
+        }
+
+        _recommendations = await SearchIndex.RecommendAsync(ask, table, MaxRecommendations);
+    }
+}

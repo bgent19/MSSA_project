@@ -174,6 +174,15 @@ namespace MeepleLedger.Tests
                 () => index.RecommendAsync(new Ask("cooperative"), table, 0));
         }
 
+        [Fact]
+        public void DoesNotClaimToUnderstandMeaning()
+        {
+            // It only matches words, so the Tonight screen must say so rather than imply understanding.
+            var index = BuildIndex([Pandemic], []);
+
+            Assert.False(index.UnderstandsMeaning);
+        }
+
         private class FakeCatalogSource : IGameCatalogSource
         {
             public GameCatalog Catalog { get; }
