@@ -42,7 +42,7 @@ below if you want to regenerate them.
 | Edit a Play | `/plays/{id}/edit` | The same form, filled in with an existing play. |
 | Play Log | `/plays` | Every play, newest first. Filter by game or to games you don't own. Edit or delete a play. |
 | Statistics | `/stats` | Games owned and plays logged, most played games, and games played but not owned. |
-| Tonight | `/tonight` | Type an Ask ("something co-operative with cards"), set players, minutes and owned-only, and get ranked Recommendations with the reason for each. Offline it matches words, not meaning, and says so. |
+| Tonight | `/tonight` | Type an Ask ("something co-operative with cards"), set players, minutes and owned-only, and get ranked Recommendations with the reason for each. Offline it matches words, not meaning, and says so. With the Cosmos DB Provider it matches by meaning against each game's Blurb. |
 
 **Changes are not saved.** The app keeps everything in memory and starts over from the seed data
 each time it launches, so anything you add, edit or delete is gone when the app stops.
@@ -158,6 +158,21 @@ writes them to `data/vectors.json` (about 6 MB, ignored by git). Running it agai
 whose text has changed, so it is cheap to re-run. At the end it prints the tokens used and a cost
 estimate — the whole catalog should cost well under one cent.
 
+### Step 4: upload to Cosmos DB
+
+```
+dotnet run --project MeepleLedger.Seeder -- upload-cosmos
+```
+
+This step needs `data/vectors.json` from step 3, the `raw/` XML from step 1, and the Cosmos DB
+container and user secrets from [Cosmos DB for NoSQL](#cosmos-db-for-nosql) below.
+
+It upserts every game into the `games` container as one document: the same facts as
+`CatalogSeed.cs`, plus the Blurb and its vector at `/embedding`. The document id is the game's name.
+Anything else in the container (like the hand-written test document) is deleted, so the container
+always matches `data/vectors.json`. Running it again is safe. It prints the request charge (RU) of
+the upload; the whole catalog is about 6,000 RU, a fraction of a cent on serverless.
+
 ## Azure resources
 
 The app runs without any of these. They are only needed by the cloud Providers for the AI features.
@@ -212,3 +227,37 @@ Some of the choices, explained:
 To check the setup by hand, paste [sample-game.json](infra/cosmos/sample-game.json) into
 **Data Explorer → games → Items → New Item**. Save it, then read it back with
 `SELECT * FROM c WHERE c.id = "Hand Written Test Game"`, and delete it after.
+
+#### Using Cosmos DB from the app
+
+Load the games with [step 4](#step-4-upload-to-cosmos-db), then start the app with the Cosmos
+Search Index:
+
+```
+dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos
+```
+
+`SearchIndex:Provider` is `InMemory` in `appsettings.json`, so a plain `dotnet run` never needs
+Azure. The web project shares the Seeder's user secrets ID, so the `Cosmos:*` and `AzureOpenAI:*`
+secrets set by the provisioning scripts are read by the app too. A missing secret stops the app at
+startup and names the setting.
+
+With the Cosmos Provider, the Tonight screen embeds the Ask with the same `game-embeddings`
+deployment and runs one query:
+
+```sql
+SELECT TOP @maxResults c.id, VectorDistance(c.embedding, @askVector) AS score
+FROM c
+WHERE (c.minPlayers <= 0 OR c.minPlayers <= @playerCount)
+  AND (c.maxPlayers <= 0 OR c.maxPlayers >= @playerCount)
+  AND (c.playtimeMinutes <= 0 OR c.playtimeMinutes <= @minutesAvailable)
+  AND ARRAY_CONTAINS(@ownedNames, c.id)   -- only when "Only games on my shelf" is ticked
+ORDER BY VectorDistance(c.embedding, @askVector)
+```
+
+The Table is in the `WHERE`, so Cosmos only ranks games that fit, and only the id and score come
+back — never the 1536-number vector. The request charge of every search is written to the log
+(about 5 to 12 RU per Ask).
+
+This is the first Provider that needs NuGet packages in the web project: `Microsoft.Azure.Cosmos`,
+plus `Newtonsoft.Json`, which the Cosmos SDK loads at runtime but leaves for you to reference.

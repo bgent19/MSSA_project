@@ -15,19 +15,6 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
     private const int CategoryMatchPoints = 2;
     private const int MechanicMatchPoints = 2;
 
-    // Ask words shorter than this are ignored ("a", "of", "me"...).
-    private const int ShortestUsefulWord = 3;
-
-    // Common words that say nothing about which Game to pick.
-    private static readonly HashSet<string> WordsToIgnore =
-    [
-        "and", "the", "for", "with", "that", "this", "something", "some", "any", "anything",
-        "game", "games", "play", "playing", "want", "what", "should", "can", "could", "would",
-        "our", "you", "your", "are", "about", "like", "please", "tonight", "good", "fun",
-        "player", "players", "people", "friends", "two", "three", "four", "five", "six",
-        "quick", "short", "long", "minutes", "hour", "hours",
-    ];
-
     private readonly IGameCatalogSource _catalogSource;
     private readonly IMeepleStore _store;
 
@@ -61,7 +48,7 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
         List<Game> candidates = FindGamesTheTableAllows(table);
 
         // Step 2: score every candidate against the words of the Ask.
-        List<string> askWords = FindUsefulWords(ask.Text);
+        List<string> askWords = AskWords.FindUsefulWords(ask.Text);
         List<ScoredGame> scoredGames = [];
         foreach (Game game in candidates)
         {
@@ -111,7 +98,7 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
 
         foreach (string askWord in askWords)
         {
-            if (HasWordStartingWith(game.Name, askWord))
+            if (AskWords.HasWordStartingWith(game.Name, askWord))
             {
                 scored.Score += NameMatchPoints;
                 scored.AddMatch("its name");
@@ -119,7 +106,7 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
 
             foreach (string category in game.Categories)
             {
-                if (HasWordStartingWith(category, askWord))
+                if (AskWords.HasWordStartingWith(category, askWord))
                 {
                     scored.Score += CategoryMatchPoints;
                     scored.AddMatch("the " + category + " category");
@@ -128,7 +115,7 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
 
             foreach (string mechanic in game.Mechanics)
             {
-                if (HasWordStartingWith(mechanic, askWord))
+                if (AskWords.HasWordStartingWith(mechanic, askWord))
                 {
                     scored.Score += MechanicMatchPoints;
                     scored.AddMatch("the " + mechanic + " mechanic");
@@ -163,14 +150,14 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
 
         if (scored.Matches.Count > 0)
         {
-            reason.Append("Matches your Ask on " + JoinWithAnd(scored.Matches) + ". ");
+            reason.Append("Matches your Ask on " + ReasonText.JoinWithAnd(scored.Matches) + ". ");
         }
         else
         {
             reason.Append("Nothing in your Ask matched its name, categories or mechanics, but it fits your Table. ");
         }
 
-        reason.Append(DescribeFit(scored.Game, table));
+        reason.Append(ReasonText.DescribeFit(scored.Game, table));
 
         if (_store.Collection.Owns(scored.Game.Name))
         {
@@ -178,114 +165,6 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
         }
 
         return reason.ToString();
-    }
-
-    // e.g. "It seats 3 (plays 1 to 4) and takes about 45 minutes of your 60."
-    private static string DescribeFit(Game game, Table table)
-    {
-        string text = "It seats " + table.PlayerCount;
-
-        if (game.MinPlayers > 0 && game.MaxPlayers > 0)
-        {
-            text += " (plays " + game.MinPlayers + " to " + game.MaxPlayers + ")";
-        }
-
-        if (game.PlaytimeMinutes > 0)
-        {
-            text += " and takes about " + game.PlaytimeMinutes + " minutes of your " + table.MinutesAvailable + ".";
-        }
-        else
-        {
-            text += ", though its playtime is unknown.";
-        }
-
-        return text;
-    }
-
-    // "A", "A and B", "A, B and C"
-    private static string JoinWithAnd(List<string> items)
-    {
-        if (items.Count == 1)
-        {
-            return items[0];
-        }
-
-        string allButLast = string.Join(", ", items.GetRange(0, items.Count - 1));
-        return allButLast + " and " + items[items.Count - 1];
-    }
-
-    // The words of the Ask worth searching for: long enough, not filler, and without a plural "s"
-    // so that "cards" still finds "Card Game".
-    private static List<string> FindUsefulWords(string text)
-    {
-        List<string> useful = [];
-
-        foreach (string word in SplitIntoWords(text))
-        {
-            if (word.Length < ShortestUsefulWord || WordsToIgnore.Contains(word))
-            {
-                continue;
-            }
-
-            string singular = word;
-            if (word.Length > ShortestUsefulWord && word.EndsWith('s') && !word.EndsWith("ss"))
-            {
-                singular = word.Substring(0, word.Length - 1);
-            }
-
-            if (!useful.Contains(singular))
-            {
-                useful.Add(singular);
-            }
-        }
-
-        return useful;
-    }
-
-    // True when any word in the text begins with the given word, so "coop" finds "Cooperative Game".
-    private static bool HasWordStartingWith(string text, string start)
-    {
-        foreach (string word in SplitIntoWords(text))
-        {
-            if (word.StartsWith(start, StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    // Lower-cases the text and splits it on anything that is not a letter or digit.
-    // Hyphens and apostrophes are dropped rather than split on, so "co-op" becomes "coop".
-    private static List<string> SplitIntoWords(string text)
-    {
-        List<string> words = [];
-        StringBuilder current = new StringBuilder();
-
-        foreach (char c in text.ToLowerInvariant())
-        {
-            if (char.IsLetterOrDigit(c))
-            {
-                current.Append(c);
-            }
-            else if (c == '-' || c == '\'')
-            {
-                // Join the two halves: "co-op" -> "coop".
-            }
-            else if (current.Length > 0)
-            {
-                words.Add(current.ToString());
-                current.Clear();
-            }
-        }
-
-        if (current.Length > 0)
-        {
-            words.Add(current.ToString());
-        }
-
-        return words;
     }
 
     // A Game together with its score for one Ask and the facts that earned it.

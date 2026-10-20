@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Xml.Linq;
+using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 
 // Set working directory to solution root
@@ -33,6 +34,11 @@ if (args.FirstOrDefault() == "smoke-embed")
 if (args.FirstOrDefault() == "embed")
 {
     return await Embed();
+}
+
+if (args.FirstOrDefault() == "upload-cosmos")
+{
+    return await UploadCosmos();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -953,6 +959,184 @@ static async Task<string?> PostWithRetry(HttpClient http, string url, List<strin
     return null;
 }
 
+// Loads every Game, with its Blurb and vector, into the Cosmos DB games container (A-08).
+// One-shot and safe to run again: each Game is upserted by id, and any document whose id is not
+// a Game any more (like the hand-written one from A-07) is deleted, so the container matches
+// data/vectors.json exactly. Metered, but 200 upserts on serverless cost a fraction of a cent.
+static async Task<int> UploadCosmos()
+{
+    string blurbFile = "data/blurbs.json";
+    string vectorFile = "data/vectors.json";
+
+    if (!File.Exists(vectorFile))
+    {
+        Console.WriteLine($"{vectorFile} not found. Run the embed step first.");
+        return 1;
+    }
+
+    var vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
+
+    var blurbs = new Dictionary<string, string>();
+    if (File.Exists(blurbFile))
+    {
+        blurbs = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(blurbFile))!;
+    }
+
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["Cosmos:Endpoint"];
+    string? key = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+    string? containerName = config["Cosmos:Container"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key)
+        || string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(containerName))
+    {
+        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database and Cosmos:Container");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets all four).");
+        return 1;
+    }
+
+    // The same game facts emit writes into CatalogSeed.cs, read from the same raw XML
+    List<CosmosGameDocument> documents = [];
+    int noVector = 0;
+
+    foreach (var batchFile in Directory.GetFiles("raw", "thing-batch-*.xml"))
+    {
+        foreach (var item in XDocument.Load(batchFile).Root!.Elements("item"))
+        {
+            string name = item.Elements("name")
+                              .First(n => (string?)n.Attribute("type") == "primary")
+                              .Attribute("value")!.Value;
+
+            int maxPlayers = int.Parse(item.Element("maxplayers")!.Attribute("value")!.Value);
+
+            // emit drops these too, so they are not in the Catalog
+            if (maxPlayers < 1)
+            {
+                continue;
+            }
+
+            if (!vectors.ContainsKey(name))
+            {
+                Console.WriteLine($"no vector for '{name}', skipped. Run the embed step.");
+                noVector++;
+                continue;
+            }
+
+            // Cosmos ids cannot contain these characters, and the id is the Game name
+            if (name.IndexOfAny(['/', '\\', '?', '#']) >= 0)
+            {
+                Console.WriteLine($"'{name}' cannot be a Cosmos id, skipped.");
+                continue;
+            }
+
+            // Same rule as emit: absent or 0 means unrated, not light
+            double? weight = null;
+            string? weightText = item.Element("statistics")?.Element("ratings")?
+                                     .Element("averageweight")?.Attribute("value")?.Value;
+            if (double.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) && w > 0)
+            {
+                weight = w;
+            }
+
+            string? blurb = null;
+            if (blurbs.ContainsKey(name))
+            {
+                blurb = blurbs[name];
+            }
+
+            string designer = item.Elements("link")
+                                  .FirstOrDefault(l => (string?)l.Attribute("type") == "boardgamedesigner")?
+                                  .Attribute("value")?.Value ?? "Unknown";
+
+            documents.Add(new CosmosGameDocument
+            {
+                Id = name,
+                Name = name,
+                Designer = designer,
+                MinPlayers = int.Parse(item.Element("minplayers")!.Attribute("value")!.Value),
+                MaxPlayers = maxPlayers,
+                PlaytimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value),
+                Categories = LinkValues(item, "boardgamecategory"),
+                Mechanics = LinkValues(item, "boardgamemechanic"),
+                Weight = weight,
+                Blurb = blurb,
+                Embedding = vectors[name].Vector,
+            });
+        }
+    }
+
+    Console.WriteLine($"{documents.Count} games to upsert ({noVector} skipped for want of a vector)");
+
+    // camelCase property names, so they match the container's vector path (/embedding)
+    // and the query in CosmosGameSearchIndex (c.minPlayers, c.playtimeMinutes...)
+    CosmosClientOptions options = new CosmosClientOptions
+    {
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    using CosmosClient client = new CosmosClient(endpoint, key, options);
+    Container container = client.GetContainer(databaseName, containerName);
+
+    double totalCharge = 0;
+    var uploadedIds = new HashSet<string>();
+
+    for (int i = 0; i < documents.Count; i++)
+    {
+        CosmosGameDocument document = documents[i];
+
+        // The partition key is /id, so the partition key value is the id itself
+        ItemResponse<CosmosGameDocument> response =
+            await container.UpsertItemAsync(document, new PartitionKey(document.Id));
+
+        totalCharge += response.RequestCharge;
+        uploadedIds.Add(document.Id);
+
+        if ((i + 1) % 20 == 0 || i == documents.Count - 1)
+        {
+            Console.WriteLine($"[{i + 1}/{documents.Count}] upserted, {response.RequestCharge:0.00} RU for '{document.Id}'");
+        }
+    }
+
+    // Find anything that is not one of these Games, so a search never returns a stray document
+    var strayIds = new List<string>();
+    using (FeedIterator<IdOnly> iterator = container.GetItemQueryIterator<IdOnly>("SELECT c.id FROM c"))
+    {
+        while (iterator.HasMoreResults)
+        {
+            FeedResponse<IdOnly> page = await iterator.ReadNextAsync();
+            totalCharge += page.RequestCharge;
+
+            foreach (IdOnly row in page)
+            {
+                if (!uploadedIds.Contains(row.Id))
+                {
+                    strayIds.Add(row.Id);
+                }
+            }
+        }
+    }
+
+    foreach (string strayId in strayIds)
+    {
+        ItemResponse<CosmosGameDocument> response =
+            await container.DeleteItemAsync<CosmosGameDocument>(strayId, new PartitionKey(strayId));
+        totalCharge += response.RequestCharge;
+        Console.WriteLine($"deleted stray document '{strayId}'");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"upserted {documents.Count} games into {databaseName}/{containerName}");
+    Console.WriteLine($"total request charge: {totalCharge:0.00} RU (average {totalCharge / Math.Max(1, documents.Count):0.00} per upsert)");
+    return 0;
+}
+
 
 // Split one CSV line on commas, except commas inside double quotes.
 // "Air, Land, & Sea" stays one field, and "" inside quotes is a literal quote.
@@ -1017,4 +1201,27 @@ class GameVector
 {
     public string Hash { get; set; } = "";
     public float[] Vector { get; set; } = [];
+}
+
+// One Game as stored in the Cosmos DB games container. Serialized in camelCase, so "embedding"
+// matches the container's vector policy path.
+class CosmosGameDocument
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Designer { get; set; } = "";
+    public int MinPlayers { get; set; }
+    public int MaxPlayers { get; set; }
+    public int PlaytimeMinutes { get; set; }
+    public List<string> Categories { get; set; } = [];
+    public List<string> Mechanics { get; set; } = [];
+    public double? Weight { get; set; }
+    public string? Blurb { get; set; }
+    public float[] Embedding { get; set; } = [];
+}
+
+// One row of "SELECT c.id FROM c"
+class IdOnly
+{
+    public string Id { get; set; } = "";
 }

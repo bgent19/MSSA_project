@@ -5,10 +5,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <!-- Shared with MeepleLedger.Seeder, so the Cosmos and Azure OpenAI secrets set for the seeder
+         are read by the app too. Only used in Development. -->
+    <UserSecretsId>93de1646-b3dc-4c1f-9bc8-3ebc34f364f3</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
     <Folder Include="Data\" />
+  </ItemGroup>
+
+  <!-- A-08: the Cosmos DB Search Index Provider. The Cosmos SDK loads Newtonsoft.Json at runtime
+       but does not depend on it, so it has to be referenced here as well. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.63.2" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
 </Project>

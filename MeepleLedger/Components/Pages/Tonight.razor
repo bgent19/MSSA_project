@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @inject IGameSearchIndex SearchIndex
 @inject IMeepleStore Store
+@inject ILogger<Tonight> Logger
 
 <PageTitle>Tonight</PageTitle>
 
@@ -111,6 +112,15 @@
             return;
         }
 
-        _recommendations = await SearchIndex.RecommendAsync(ask, table, MaxRecommendations);
+        // A cloud Search Index can fail (network, settings); say so instead of breaking the page.
+        try
+        {
+            _recommendations = await SearchIndex.RecommendAsync(ask, table, MaxRecommendations);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "The Search Index failed for \"{Ask}\"", ask.Text);
+            _error = "The search is unavailable right now. Try again in a moment.";
+        }
     }
 }
