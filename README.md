@@ -16,6 +16,7 @@ You need the .NET 10 SDK to build and run this.
 | [MeepleLedger.Tests/](MeepleLedger.Tests/) | xUnit tests for the domain rules. |
 | [MeepleLedger.Seeder/](MeepleLedger.Seeder/) | A separate console app that creates the files in `MeepleLedger/Data/`. |
 | [presentation/](presentation/) | HTML slides for the project presentation. |
+| [infra/](infra/) | Scripts and policy files that create the Azure resources for the AI features. |
 | `raw/`, `data/` | Working files for the seeder. Git ignores both, so they are empty after a fresh clone. |
 
 `MSSA_project.slnx` ties the three projects together.
@@ -156,3 +157,58 @@ It turns each game's name, categories, mechanics and Blurb into a vector, 20 gam
 writes them to `data/vectors.json` (about 6 MB, ignored by git). Running it again only embeds games
 whose text has changed, so it is cheap to re-run. At the end it prints the tokens used and a cost
 estimate — the whole catalog should cost well under one cent.
+
+## Azure resources
+
+The app runs without any of these. They are only needed by the cloud Providers for the AI features.
+
+### Azure OpenAI (embeddings)
+
+```
+pwsh infra/openai/provision-openai.ps1
+```
+
+Run it from the repo root after `az login`. It creates the `rg-meepleledger` resource group (if it
+doesn't exist yet), an Azure OpenAI account called `meepleledger-openai`, and a deployment called
+`game-embeddings` that runs `text-embedding-3-small` (1536 dimensions, 20K tokens per minute). It
+then saves `AzureOpenAI:Endpoint`, `AzureOpenAI:Key` and `AzureOpenAI:EmbeddingDeployment` into the
+Seeder's user secrets. Check it with `dotnet run --project MeepleLedger.Seeder -- smoke-embed`. A
+brand-new deployment can return `DeploymentNotFound` for a few minutes.
+
+### Cosmos DB for NoSQL
+
+```
+pwsh infra/cosmos/provision-cosmos.ps1
+```
+
+Run it from the repo root after `az login`. It creates the `rg-meepleledger` resource group (if it
+doesn't exist yet), a **serverless** Cosmos DB account called `meepleledger-cosmos` with NoSQL vector
+search turned on, and a `meepleledger` database with a `games` container. It then saves
+`Cosmos:Endpoint`, `Cosmos:Key`, `Cosmos:Database` and `Cosmos:Container` into the Seeder's user
+secrets. Running it a second time skips anything that already exists.
+
+The container is created with two policy files from [infra/cosmos/](infra/cosmos/):
+
+- [games-vector-policy.json](infra/cosmos/games-vector-policy.json): vectors live at `/embedding`,
+  are `float32`, use `cosine` distance and have 1536 dimensions (what `text-embedding-3-small`
+  returns). **This can't be changed once the container exists.** To change it you have to delete the
+  container and create it again.
+- [games-indexing-policy.json](infra/cosmos/games-indexing-policy.json): a `quantizedFlat` vector
+  index on `/embedding`, and `/embedding/*` left out of the normal range index. A 1536-number array
+  that is never range-queried would otherwise make every write cost more.
+
+Some of the choices, explained:
+
+- **Serverless** because the project is small and mostly idle, and serverless only bills for what you
+  use. It has a storage limit and no SLA, so it would be the wrong pick for a production workload.
+- **`quantizedFlat` rather than `diskANN`.** `flat` can't go above 505 dimensions, so it isn't an
+  option. Microsoft recommends `quantizedFlat` for 50,000 vectors or fewer. With fewer than 1,000
+  vectors, Cosmos does a full scan for both types anyway.
+- **Partition key `/id`.** Writes are upserts of one Game at a time, and every Ask searches the whole
+  Catalog, so no partition key could narrow a search. `/id` gives each Game its own partition, so
+  no partition gets more traffic than the others. With per-user data this would be a bad choice,
+  because a query by owner would have to check every partition.
+
+To check the setup by hand, paste [sample-game.json](infra/cosmos/sample-game.json) into
+**Data Explorer → games → Items → New Item**. Save it, then read it back with
+`SELECT * FROM c WHERE c.id = "Hand Written Test Game"`, and delete it after.

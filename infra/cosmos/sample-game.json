@@ -1,0 +1,11 @@
+{
+  "id": "Hand Written Test Game",
+  "name": "Hand Written Test Game",
+  "designer": "Data Explorer",
+  "minPlayers": 2,
+  "maxPlayers": 4,
+  "playtimeMinutes": 30,
+  "categories": [ "Card Game" ],
+  "mechanics": [ "Cooperative Game" ],
+  "weight": 1.5
+}
