@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Xml.Linq;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json.Linq;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -39,6 +40,11 @@ if (args.FirstOrDefault() == "embed")
 if (args.FirstOrDefault() == "upload-cosmos")
 {
     return await UploadCosmos();
+}
+
+if (args.FirstOrDefault() == "measure-ru")
+{
+    return await MeasureRu();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -1137,6 +1143,304 @@ static async Task<int> UploadCosmos()
     return 0;
 }
 
+// Measures the request charge of the Tonight query and a few comparisons for A-09, and prints a
+// table to paste into the ticket. Read-only apart from three writes: one upsert of a Game back over itself,
+// and a copy of it created and deleted (to price writes under the current indexing policy).
+// Metered, but each run is well under 1,000 RU.
+//
+// It reads, in order:
+//   1. the account's default consistency and whether an indexing policy change is still being applied
+//   2. the vector query: the A-08 query, the whole document projected, and the same query with no Table in the WHERE
+//   3. a point read and the vector query at each of the five consistency levels, asked per request
+//   4. the same lookup as a single-partition query, a cross-partition query and a point read
+//   5. one upsert of an unchanged Game, and one create and delete of a copy of it
+static async Task<int> MeasureRu()
+{
+    // The Ask and Table the A-08 ticket judged the Tonight screen on: "quick co-op for three"
+    string askText = "quick co-op for three";
+    int playerCount = 3;
+    int minutesAvailable = 60;
+    int maxResults = 10;
+
+    // Charges are steady, but run each one a few times so a one-off is easy to spot
+    int repeats = 3;
+
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["Cosmos:Endpoint"];
+    string? key = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+    string? containerName = config["Cosmos:Container"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key)
+        || string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(containerName))
+    {
+        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database and Cosmos:Container");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets all four).");
+        return 1;
+    }
+
+    EmbeddingSettings? embeddingSettings = LoadEmbeddingSettings();
+    if (embeddingSettings == null)
+    {
+        return 1;
+    }
+
+    // Embed the Ask once; every vector query below reuses it
+    HttpClient http = new();
+    http.DefaultRequestHeaders.Add("api-key", embeddingSettings.Key);
+    string? embeddingResponse = await PostWithRetry(http, embeddingSettings.Url, [askText]);
+    if (embeddingResponse == null)
+    {
+        return 1;
+    }
+
+    float[] askVector;
+    using (JsonDocument json = JsonDocument.Parse(embeddingResponse))
+    {
+        JsonElement embedding = json.RootElement.GetProperty("data")[0].GetProperty("embedding");
+        askVector = new float[embedding.GetArrayLength()];
+        int i = 0;
+        foreach (JsonElement number in embedding.EnumerateArray())
+        {
+            askVector[i] = number.GetSingle();
+            i++;
+        }
+    }
+
+    CosmosClientOptions options = new CosmosClientOptions
+    {
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    using CosmosClient client = new CosmosClient(endpoint, key, options);
+    Container container = client.GetContainer(databaseName, containerName);
+
+    // 1. Where the account and container stand
+    AccountProperties account = await client.ReadAccountAsync();
+    ConsistencyLevel accountLevel = account.Consistency.DefaultConsistencyLevel;
+    Console.WriteLine($"account default consistency: {accountLevel}");
+
+    // Indexing changes apply in the background. A number taken before this reaches 100 is a
+    // number for the old index, so stop rather than record it.
+    ContainerResponse containerResponse = await container.ReadContainerAsync(
+        new ContainerRequestOptions { PopulateQuotaInfo = true });
+    string? progress = containerResponse.Headers["x-ms-documentdb-collection-index-transformation-progress"];
+    Console.WriteLine($"index transformation progress: {progress ?? "(not reported)"}%");
+    if (progress != null && progress != "100")
+    {
+        Console.WriteLine("The indexing policy is still being applied. Run this again once it reaches 100.");
+        return 1;
+    }
+
+    IndexingPolicy indexing = containerResponse.Resource.IndexingPolicy;
+    Console.WriteLine($"indexing: {indexing.IncludedPaths.Count} included path(s), "
+                      + $"{indexing.ExcludedPaths.Count} excluded, {indexing.CompositeIndexes.Count} composite");
+    foreach (IncludedPath path in indexing.IncludedPaths)
+    {
+        Console.WriteLine($"  include {path.Path}");
+    }
+
+    Console.WriteLine();
+
+    // Every result row is read as a JObject (the SDK serializer is Newtonsoft), so SELECT * and SELECT c.id can share one method
+    string tableWhere =
+        "WHERE (c.minPlayers <= 0 OR c.minPlayers <= @playerCount) "
+        + "AND (c.maxPlayers <= 0 OR c.maxPlayers >= @playerCount) "
+        + "AND (c.playtimeMinutes <= 0 OR c.playtimeMinutes <= @minutesAvailable) ";
+    string orderBy = "ORDER BY VectorDistance(c.embedding, @askVector)";
+
+    string a08Sql = "SELECT TOP @maxResults c.id, VectorDistance(c.embedding, @askVector) AS score FROM c " + tableWhere + orderBy;
+    string selectStarSql = "SELECT TOP @maxResults c AS game, VectorDistance(c.embedding, @askVector) AS score FROM c " + tableWhere + orderBy;
+    string noTableSql = "SELECT TOP @maxResults c.id, VectorDistance(c.embedding, @askVector) AS score FROM c " + orderBy;
+
+    // 2. The vector query and two variations of it
+    Console.WriteLine("== vector query (Ask \"" + askText + "\", " + playerCount + " players, " + minutesAvailable + " minutes, TOP " + maxResults + ") ==");
+
+    QueryDefinition a08Query = BuildMeasureQuery(a08Sql, askVector, playerCount, minutesAvailable, maxResults);
+    QueryCharge a08 = await MeasureQuery(container, a08Query, null, null, repeats);
+    PrintCharge("A-08 query (id + score)", a08);
+
+    QueryDefinition selectStarQuery = BuildMeasureQuery(selectStarSql, askVector, playerCount, minutesAvailable, maxResults);
+    PrintCharge("whole document (vector sent back)", await MeasureQuery(container, selectStarQuery, null, null, repeats));
+
+    QueryDefinition noTableQuery = BuildMeasureQuery(noTableSql, askVector, playerCount, minutesAvailable, maxResults);
+    PrintCharge("id + score, no Table in WHERE", await MeasureQuery(container, noTableQuery, null, null, repeats));
+
+    // Index metrics say which paths the WHERE used and which index it wished it had
+    QueryRequestOptions metricsOptions = new QueryRequestOptions { PopulateIndexMetrics = true };
+    using (FeedIterator<JObject> iterator = container.GetItemQueryIterator<JObject>(a08Query, null, metricsOptions))
+    {
+        FeedResponse<JObject> page = await iterator.ReadNextAsync();
+        Console.WriteLine();
+        Console.WriteLine("index metrics for the A-08 query:");
+        Console.WriteLine(page.IndexMetrics);
+    }
+
+    Console.WriteLine();
+
+    // 3. Consistency, asked for per request. A request may relax the account's level but never
+    //    strengthen it, so the stronger levels only run when the account itself is that strong.
+    string sampleId = a08.FirstId;
+    if (sampleId == "")
+    {
+        Console.WriteLine("The A-08 query returned no Games, so there is nothing to read. Run upload-cosmos first.");
+        return 1;
+    }
+
+    Console.WriteLine($"== consistency per request (account is {accountLevel}; point read of '{sampleId}') ==");
+
+    ConsistencyLevel[] levels =
+    [
+        ConsistencyLevel.Strong,
+        ConsistencyLevel.BoundedStaleness,
+        ConsistencyLevel.Session,
+        ConsistencyLevel.ConsistentPrefix,
+        ConsistencyLevel.Eventual,
+    ];
+
+    foreach (ConsistencyLevel level in levels)
+    {
+        try
+        {
+            double readCharge = 0;
+            for (int i = 0; i < repeats; i++)
+            {
+                ItemResponse<JObject> read = await container.ReadItemAsync<JObject>(
+                    sampleId, new PartitionKey(sampleId), new ItemRequestOptions { ConsistencyLevel = level });
+                readCharge = read.RequestCharge;
+            }
+
+            QueryCharge queryCharge = await MeasureQuery(container, a08Query, null, level, repeats);
+            Console.WriteLine($"  {level,-17} point read {readCharge,6:0.00} RU   vector query {queryCharge.Last,7:0.00} RU");
+        }
+        catch (Exception ex)
+        {
+            // Asking for a stronger level than the account's is refused
+            string firstLine = ex.Message.Split('\n')[0].Trim();
+            Console.WriteLine($"  {level,-17} refused: {firstLine}");
+        }
+    }
+
+    Console.WriteLine();
+
+    // 4. One Game found three ways. The partition key is /id, so a query that names the
+    //    partition key value goes to one partition; one that does not is sent to all of them.
+    Console.WriteLine($"== single-partition vs cross-partition (looking up '{sampleId}') ==");
+
+    ItemResponse<JObject> pointRead = await container.ReadItemAsync<JObject>(sampleId, new PartitionKey(sampleId));
+    Console.WriteLine($"  point read (id + partition key)       {pointRead.RequestCharge,7:0.00} RU");
+
+    QueryDefinition byName = new QueryDefinition("SELECT c.id, c.name FROM c WHERE c.name = @name")
+        .WithParameter("@name", sampleId);
+
+    QueryCharge singlePartition = await MeasureQuery(container, byName, new PartitionKey(sampleId), null, repeats);
+    PrintCharge("query, partition key given", singlePartition);
+
+    QueryCharge crossPartition = await MeasureQuery(container, byName, null, null, repeats);
+    PrintCharge("query, no partition key (fan-out)", crossPartition);
+
+    Console.WriteLine();
+
+    // 5. The price of one write under the current indexing policy: read a Game and put it back
+    //    unchanged. Fewer indexed paths should make this cheaper.
+    Console.WriteLine("== one upsert of an unchanged Game ==");
+    ItemResponse<JObject> before = await container.ReadItemAsync<JObject>(sampleId, new PartitionKey(sampleId));
+    ItemResponse<JObject> upsert = await container.UpsertItemAsync(before.Resource, new PartitionKey(sampleId));
+    Console.WriteLine($"  upsert '{sampleId}'  {upsert.RequestCharge,7:0.00} RU");
+
+    // An unchanged upsert may not touch the index at all, so also price a brand-new document:
+    // a copy of the same Game under a probe id, deleted again straight away.
+    string probeId = "A-09 write probe";
+    JObject probe = (JObject)before.Resource.DeepClone();
+    probe["id"] = probeId;
+    ItemResponse<JObject> create = await container.CreateItemAsync(probe, new PartitionKey(probeId));
+    ItemResponse<JObject> delete = await container.DeleteItemAsync<JObject>(probeId, new PartitionKey(probeId));
+    Console.WriteLine($"  create a new copy       {create.RequestCharge,7:0.00} RU");
+    Console.WriteLine($"  delete it again         {delete.RequestCharge,7:0.00} RU");
+
+    return 0;
+}
+
+// The measurement queries all take the same parameters; Cosmos ignores the ones a query does not use
+static QueryDefinition BuildMeasureQuery(string sql, float[] askVector, int playerCount, int minutesAvailable, int maxResults)
+{
+    return new QueryDefinition(sql)
+        .WithParameter("@maxResults", maxResults)
+        .WithParameter("@askVector", askVector)
+        .WithParameter("@playerCount", playerCount)
+        .WithParameter("@minutesAvailable", minutesAvailable);
+}
+
+// Runs a query to the end the given number of times, adding up the charge of every page.
+// partitionKey null means cross-partition; consistency null means the account's level.
+static async Task<QueryCharge> MeasureQuery(Container container, QueryDefinition query, PartitionKey? partitionKey,
+    ConsistencyLevel? consistency, int repeats)
+{
+    QueryCharge charge = new QueryCharge();
+
+    QueryRequestOptions requestOptions = new QueryRequestOptions
+    {
+        PartitionKey = partitionKey,
+        ConsistencyLevel = consistency,
+    };
+
+    for (int run = 0; run < repeats; run++)
+    {
+        double runCharge = 0;
+        int rows = 0;
+        int pages = 0;
+
+        using FeedIterator<JObject> iterator = container.GetItemQueryIterator<JObject>(query, null, requestOptions);
+        while (iterator.HasMoreResults)
+        {
+            FeedResponse<JObject> page = await iterator.ReadNextAsync();
+            runCharge += page.RequestCharge;
+            pages++;
+
+            foreach (JObject row in page)
+            {
+                if (rows == 0 && charge.FirstId == "" && row["id"] != null)
+                {
+                    charge.FirstId = row["id"]!.ToString();
+                }
+
+                rows++;
+            }
+        }
+
+        charge.Last = runCharge;
+        charge.Rows = rows;
+        charge.Pages = pages;
+        if (run == 0 || runCharge < charge.Lowest)
+        {
+            charge.Lowest = runCharge;
+        }
+
+        if (runCharge > charge.Highest)
+        {
+            charge.Highest = runCharge;
+        }
+    }
+
+    return charge;
+}
+
+static void PrintCharge(string label, QueryCharge charge)
+{
+    string spread = "";
+    if (charge.Highest - charge.Lowest > 0.005)
+    {
+        spread = $"  (range {charge.Lowest:0.00}-{charge.Highest:0.00})";
+    }
+
+    Console.WriteLine($"  {label,-38}{charge.Last,7:0.00} RU  {charge.Rows} rows, {charge.Pages} page(s){spread}");
+}
 
 // Split one CSV line on commas, except commas inside double quotes.
 // "Air, Land, & Sea" stays one field, and "" inside quotes is a literal quote.
@@ -1224,4 +1528,16 @@ class CosmosGameDocument
 class IdOnly
 {
     public string Id { get; set; } = "";
+}
+
+// What measure-ru records for one query: the charge of the last run, the cheapest and dearest of
+// all runs, and the first id returned (used as the sample Game for the point reads)
+class QueryCharge
+{
+    public double Last { get; set; }
+    public double Lowest { get; set; }
+    public double Highest { get; set; }
+    public int Rows { get; set; }
+    public int Pages { get; set; }
+    public string FirstId { get; set; } = "";
 }

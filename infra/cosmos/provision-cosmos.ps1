@@ -55,6 +55,9 @@ else {
 
 # 3. The account. Serverless for cost control, and vector search enabled at creation time so
 #    the container below can be given a vector policy.
+#    Session consistency is a measured choice (A-09): Strong and Bounded Staleness doubled every
+#    read, and Consistent Prefix and Eventual cost no less than Session. Session is the weakest
+#    level that lets a writer (upload-cosmos, A-10) read its own writes.
 $existingAccount = az cosmosdb list --resource-group $resourceGroup --query "[?name=='$accountName'].name" -o tsv
 if ($existingAccount -eq $accountName) {
     Write-Host "Cosmos DB account $accountName already exists."

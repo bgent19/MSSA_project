@@ -209,8 +209,11 @@ The container is created with two policy files from [infra/cosmos/](infra/cosmos
   returns). **This can't be changed once the container exists.** To change it you have to delete the
   container and create it again.
 - [games-indexing-policy.json](infra/cosmos/games-indexing-policy.json): a `quantizedFlat` vector
-  index on `/embedding`, and `/embedding/*` left out of the normal range index. A 1536-number array
-  that is never range-queried would otherwise make every write cost more.
+  index on `/embedding`, and a range index on only the three paths the Table filters on
+  (`/minPlayers`, `/maxPlayers`, `/playtimeMinutes`). Everything else is excluded (`/*`). `id` is
+  always indexed, so the owned-only filter still works. Indexing every path (the Cosmos default)
+  made the Tonight query no cheaper and made each new document about 16% dearer to write (A-09).
+  A query that filters on any other path, such as `c.name`, now scans every document.
 
 Some of the choices, explained:
 
@@ -258,6 +261,17 @@ ORDER BY VectorDistance(c.embedding, @askVector)
 The Table is in the `WHERE`, so Cosmos only ranks games that fit, and only the id and score come
 back — never the 1536-number vector. The request charge of every search is written to the log
 (about 5 to 12 RU per Ask).
+
+To measure the request charges again (after changing the indexing policy or the consistency level):
+
+```
+dotnet run --project MeepleLedger.Seeder -- measure-ru
+```
+
+It prints the charge of the Tonight query and a few variations of it, a point read and the query at
+each consistency level, a single-partition against a cross-partition query, and the cost of a write.
+It refuses to measure while an indexing policy change is still being applied. It writes one test
+document and deletes it again. The A-09 ticket records the numbers and what they mean.
 
 This is the first Provider that needs NuGet packages in the web project: `Microsoft.Azure.Cosmos`,
 plus `Newtonsoft.Json`, which the Cosmos SDK loads at runtime but leaves for you to reference.

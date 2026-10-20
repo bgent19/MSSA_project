@@ -3,15 +3,18 @@
   "automatic": true,
   "includedPaths": [
     {
-      "path": "/*"
+      "path": "/minPlayers/?"
+    },
+    {
+      "path": "/maxPlayers/?"
+    },
+    {
+      "path": "/playtimeMinutes/?"
     }
   ],
   "excludedPaths": [
     {
-      "path": "/_etag/?"
-    },
-    {
-      "path": "/embedding/*"
+      "path": "/*"
     }
   ],
   "vectorIndexes": [
