@@ -168,7 +168,9 @@ This step needs `data/vectors.json` from step 3, the `raw/` XML from step 1, and
 container and user secrets from [Cosmos DB for NoSQL](#cosmos-db-for-nosql) below.
 
 It upserts every game into the `games` container as one document: the same facts as
-`CatalogSeed.cs`, plus the Blurb and its vector at `/embedding`. The document id is the game's name.
+`CatalogSeed.cs`, plus the Blurb, its vector at `/embedding`, and `embeddingTextHash` (the hash of
+the text the vector was made from, used by the [change feed](#watching-the-change-feed)). The
+document id is the game's name.
 Anything else in the container (like the hand-written test document) is deleted, so the container
 always matches `data/vectors.json`. Running it again is safe. It prints the request charge (RU) of
 the upload; the whole catalog is about 6,000 RU, a fraction of a cent on serverless.
@@ -198,9 +200,10 @@ pwsh infra/cosmos/provision-cosmos.ps1
 
 Run it from the repo root after `az login`. It creates the `rg-meepleledger` resource group (if it
 doesn't exist yet), a **serverless** Cosmos DB account called `meepleledger-cosmos` with NoSQL vector
-search turned on, and a `meepleledger` database with a `games` container. It then saves
-`Cosmos:Endpoint`, `Cosmos:Key`, `Cosmos:Database` and `Cosmos:Container` into the Seeder's user
-secrets. Running it a second time skips anything that already exists.
+search turned on, and a `meepleledger` database with a `games` container and a `leases` container
+(for the [change feed processor](#watching-the-change-feed)). It then saves `Cosmos:Endpoint`,
+`Cosmos:Key`, `Cosmos:Database`, `Cosmos:Container` and `Cosmos:LeaseContainer` into the Seeder's
+user secrets. Running it a second time skips anything that already exists.
 
 The container is created with two policy files from [infra/cosmos/](infra/cosmos/):
 
@@ -275,3 +278,34 @@ document and deletes it again. The A-09 ticket records the numbers and what they
 
 This is the first Provider that needs NuGet packages in the web project: `Microsoft.Azure.Cosmos`,
 plus `Newtonsoft.Json`, which the Cosmos SDK loads at runtime but leaves for you to reference.
+
+#### Watching the change feed
+
+```
+dotnet run --project MeepleLedger.Seeder -- watch-cosmos [instance name]
+```
+
+This runs a change feed processor on the `games` container until you press Enter. When a Game is
+added, or its Blurb, categories or mechanics are edited, it records that the Game needs a new
+vector. It does **not** call the embeddings API: it writes a log line and adds an embed request to
+`data/embed-requests.jsonl` (ignored by git). A later ticket (A-19) sends these requests over
+Service Bus instead, to a worker that does the embedding.
+
+- **How it tells an edit from a vector write.** `upload-cosmos` stores `embeddingTextHash` on every
+  document: the hash of the text its vector was made from. The handler hashes the document's current
+  text and only queues a request when the two differ. So re-running `upload-cosmos` while the
+  processor is running shows 200 changes and queues nothing. Run `upload-cosmos` once after pulling
+  this change, or every Game looks new.
+- **Leases.** The processor is named `embed-requests` and saves how far it has read in the `leases`
+  container (created by `provision-cosmos.ps1`). Stop it and start it again and it carries on from
+  where it stopped. The first run starts from "now", not from the beginning, so it never queues the
+  whole Catalog.
+- **Instance name.** The instance name defaults to the machine name. Two processes with the same
+  processor name share the work. A process with a different processor name would get every change
+  again.
+- **Deletes are invisible.** The change feed only carries creates and updates. Deleting a Game in
+  Data Explorer does not reach the handler at all. To react to a delete you would mark the document
+  as deleted (an update) instead of deleting it.
+
+To try it, start the processor, then in **Data Explorer → games → Items** open a Game, change a word
+in its `blurb` and save. Within a few seconds the processor prints the change and queues a request.

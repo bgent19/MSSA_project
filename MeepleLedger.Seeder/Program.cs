@@ -47,6 +47,17 @@ if (args.FirstOrDefault() == "measure-ru")
     return await MeasureRu();
 }
 
+if (args.FirstOrDefault() == "watch-cosmos")
+{
+    // Optional second argument: this host's instance name (defaults to the machine name)
+    string instanceName = Environment.MachineName;
+    if (args.Length > 1)
+    {
+        instanceName = args[1];
+    }
+    return await WatchCosmos(instanceName);
+}
+
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
 string? token = Environment.GetEnvironmentVariable("BGG_TOKEN");
 string outputDir = "raw";
@@ -1071,6 +1082,7 @@ static async Task<int> UploadCosmos()
                 Weight = weight,
                 Blurb = blurb,
                 Embedding = vectors[name].Vector,
+                EmbeddingTextHash = vectors[name].Hash,
             });
         }
     }
@@ -1442,6 +1454,154 @@ static void PrintCharge(string label, QueryCharge charge)
     Console.WriteLine($"  {label,-38}{charge.Last,7:0.00} RU  {charge.Rows} rows, {charge.Pages} page(s){spread}");
 }
 
+// Hosts a change feed processor on the games container (A-10). It runs until Enter is pressed.
+// When a Game is added or its Blurb edited, the handler records the intent to re-embed it on an
+// IEmbedRequestQueue. It never calls the embeddings API itself: detecting a change and doing the
+// slow, metered work are kept apart, so A-19 can swap the local queue for Service Bus.
+//
+// Things worth knowing about the change feed:
+//   - Deletes never reach the handler. The feed only carries creates and updates; a delete would
+//     have to be a soft-delete flag (an update) to be seen.
+//   - Every write shows up, including a write that only replaced the vector. The handler compares
+//     the hash of the Game's text with the hash the vector was made from, so a vector write-back
+//     (A-19) does not queue another embed and loop forever.
+//   - The processor saves how far it has read in the leases container. A restart carries on from
+//     there. The very first run starts from "now", not from the beginning, so it never re-queues
+//     all 200 Games.
+//   - Hosts that share the processor name split the work between them. A host with a different
+//     processor name gets every change again.
+static async Task<int> WatchCosmos(string instanceName)
+{
+    // The processor name is what the leases are saved under. Change it and the processor starts
+    // over with no leases, as if it were a brand-new consumer.
+    string processorName = "embed-requests";
+
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["Cosmos:Endpoint"];
+    string? key = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+    string? containerName = config["Cosmos:Container"];
+    string? leaseContainerName = config["Cosmos:LeaseContainer"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key)
+        || string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(containerName)
+        || string.IsNullOrWhiteSpace(leaseContainerName))
+    {
+        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database, Cosmos:Container");
+        Console.WriteLine("and Cosmos:LeaseContainer (pwsh infra/cosmos/provision-cosmos.ps1 sets all five).");
+        return 1;
+    }
+
+    // camelCase, the same as upload-cosmos, so the documents read back into CosmosGameDocument
+    CosmosClientOptions options = new CosmosClientOptions
+    {
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    using CosmosClient client = new CosmosClient(endpoint, key, options);
+    Container games = client.GetContainer(databaseName, containerName);
+    Container leases = client.GetContainer(databaseName, leaseContainerName);
+
+    // Fail with a clear message if the leases container was never created, rather than a 404
+    // from somewhere inside the processor
+    try
+    {
+        await leases.ReadContainerAsync();
+    }
+    catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+    {
+        Console.WriteLine($"The container '{leaseContainerName}' does not exist. Run pwsh infra/cosmos/provision-cosmos.ps1 to create it.");
+        return 1;
+    }
+
+    // Until A-19, "recording the intent" means a log line and a line in a local file
+    IEmbedRequestQueue queue = new LocalEmbedRequestQueue("data/embed-requests.jsonl");
+
+    // Called with each batch of changed documents. Throwing from here means the batch is retried,
+    // so the handler only does cheap work that cannot really fail.
+    async Task HandleChangesAsync(ChangeFeedProcessorContext context, IReadOnlyCollection<CosmosGameDocument> changes, CancellationToken cancellationToken)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {changes.Count} change(s) on lease {context.LeaseToken}, {context.Headers.RequestCharge:0.00} RU to read");
+
+        foreach (CosmosGameDocument game in changes)
+        {
+            if (string.IsNullOrWhiteSpace(game.Blurb))
+            {
+                Console.WriteLine($"  '{game.Id}': no Blurb, nothing to embed");
+                continue;
+            }
+
+            string textHash = HashText(BuildEmbeddingText(game.Name, game.Categories, game.Mechanics, game.Blurb));
+
+            if (textHash == game.EmbeddingTextHash)
+            {
+                Console.WriteLine($"  '{game.Id}': text unchanged, vector is up to date");
+                continue;
+            }
+
+            // A Game with no hash at all has never been embedded from this text: a new Game
+            string reason = "changed";
+            if (game.EmbeddingTextHash == null)
+            {
+                reason = "new";
+            }
+
+            EmbedRequest request = new EmbedRequest
+            {
+                SchemaVersion = 1,
+                GameId = game.Id,
+                TextHash = textHash,
+                Reason = reason,
+                DetectedAtUtc = DateTime.UtcNow,
+            };
+
+            await queue.SendAsync(request);
+        }
+    }
+
+    // No WithStartTime: a processor with no leases yet starts from now. Calling
+    // WithStartFromBeginning() would replay the whole container (and re-queue every Game) the
+    // first time it ran.
+    ChangeFeedProcessor processor = games
+        .GetChangeFeedProcessorBuilder<CosmosGameDocument>(processorName, HandleChangesAsync)
+        .WithInstanceName(instanceName)
+        .WithLeaseContainer(leases)
+        .WithLeaseAcquireNotification(leaseToken =>
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] instance '{instanceName}' took lease {leaseToken}");
+            return Task.CompletedTask;
+        })
+        .WithLeaseReleaseNotification(leaseToken =>
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] instance '{instanceName}' let go of lease {leaseToken}");
+            return Task.CompletedTask;
+        })
+        .WithErrorNotification((leaseToken, exception) =>
+        {
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] error on lease {leaseToken}: {exception.Message}");
+            return Task.CompletedTask;
+        })
+        .Build();
+
+    await processor.StartAsync();
+
+    Console.WriteLine($"Watching {databaseName}/{containerName} as processor '{processorName}', instance '{instanceName}'.");
+    Console.WriteLine($"Leases are kept in {databaseName}/{leaseContainerName}. New Games and edited Blurbs are queued to data/embed-requests.jsonl.");
+    Console.WriteLine("Press Enter to stop.");
+    Console.ReadLine();
+
+    // Stopping cleanly releases the leases, so another instance (or the next run) can pick them up
+    await processor.StopAsync();
+    Console.WriteLine("Stopped.");
+    return 0;
+}
+
 // Split one CSV line on commas, except commas inside double quotes.
 // "Air, Land, & Sea" stays one field, and "" inside quotes is a literal quote.
 static string[] SplitCsvLine(string line)
@@ -1522,6 +1682,11 @@ class CosmosGameDocument
     public double? Weight { get; set; }
     public string? Blurb { get; set; }
     public float[] Embedding { get; set; } = [];
+
+    // The hash of the text the vector was made from (the same hash as in data/vectors.json).
+    // The change feed handler compares it with the document's current text to tell a real edit
+    // from a write that only replaced the vector (A-10).
+    public string? EmbeddingTextHash { get; set; }
 }
 
 // One row of "SELECT c.id FROM c"
@@ -1540,4 +1705,50 @@ class QueryCharge
     public int Rows { get; set; }
     public int Pages { get; set; }
     public string FirstId { get; set; } = "";
+}
+
+// The intent to re-embed one Game, as the change feed handler records it (A-10). A-19 sends the
+// same shape over Service Bus, so it carries a schema version from the start.
+class EmbedRequest
+{
+    public int SchemaVersion { get; set; }
+    public string GameId { get; set; } = "";
+    public string TextHash { get; set; } = "";
+    public string Reason { get; set; } = "";       // "new" or "changed"
+    public DateTime DetectedAtUtc { get; set; }
+}
+
+// Where the change feed handler records an EmbedRequest. This is the seam: the handler only knows
+// it can send a request, so A-19 can put a Service Bus queue behind it without touching the handler.
+interface IEmbedRequestQueue
+{
+    Task SendAsync(EmbedRequest request);
+}
+
+// The stand-in until A-19: writes a log line and appends the request to a local JSON Lines file
+// (one request per line), so the queued requests are still there after the host stops.
+class LocalEmbedRequestQueue : IEmbedRequestQueue
+{
+    private readonly string filePath;
+
+    // The processor can call the handler for different leases at the same time
+    private readonly object fileLock = new object();
+
+    public LocalEmbedRequestQueue(string filePath)
+    {
+        this.filePath = filePath;
+    }
+
+    public Task SendAsync(EmbedRequest request)
+    {
+        string line = JsonSerializer.Serialize(request);
+
+        lock (fileLock)
+        {
+            File.AppendAllText(filePath, line + Environment.NewLine);
+        }
+
+        Console.WriteLine($"  '{request.GameId}': {request.Reason}, embed request queued (hash {request.TextHash.Substring(0, 8)})");
+        return Task.CompletedTask;
+    }
 }

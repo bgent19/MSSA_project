@@ -2,7 +2,8 @@
 #
 # Creates (or reuses) the resource group, a serverless Cosmos DB account with NoSQL vector search
 # turned on, a "meepleledger" database and a "games" container, then stores the endpoint and key
-# in the Seeder's user secrets. Safe to run again: anything that already exists is left alone.
+# in the Seeder's user secrets. Also creates the "leases" container the change feed processor
+# needs (A-10). Safe to run again: anything that already exists is left alone.
 #
 # METERED. Serverless bills per request unit and per GB stored, so an idle account with 200 games
 # costs close to nothing, but it is still a billable resource. A-33 tears it down.
@@ -14,6 +15,7 @@ $location = "eastus2"            # same region as the embeddings resource from A
 $accountName = "meepleledger-cosmos"
 $databaseName = "meepleledger"
 $containerName = "games"
+$leaseContainerName = "leases"   # bookkeeping for the change feed processor (A-10)
 
 # One sentence on the partition key: the only access patterns are point upserts by Game and a
 # vector search over the whole Catalog for every Ask, so no key could scope the search and /id
@@ -123,7 +125,29 @@ else {
     Test-LastCommand "create container"
 }
 
-# 6. Connection details go into the Seeder's user secrets, never into appsettings.json.
+# 6. The leases container for the change feed processor (A-10). The processor writes one lease
+#    document per range of the games container, recording how far it has read, so a restarted
+#    host carries on from there instead of starting over. The SDK needs its partition key to be /id.
+#    It has no vector or indexing policy to set. On serverless its reads and writes are billed as
+#    request units like any other container; on provisioned throughput it would need its own RU/s,
+#    or the processor gets throttled by its own bookkeeping.
+$existingLeases = az cosmosdb sql container list --account-name $accountName --resource-group $resourceGroup --database-name $databaseName --query "[?name=='$leaseContainerName'].name" -o tsv
+if ($existingLeases -eq $leaseContainerName) {
+    Write-Host "Container $leaseContainerName already exists."
+}
+else {
+    Write-Host "Creating container $leaseContainerName for the change feed leases..."
+    az cosmosdb sql container create `
+        --account-name $accountName `
+        --resource-group $resourceGroup `
+        --database-name $databaseName `
+        --name $leaseContainerName `
+        --partition-key-path "/id" `
+        --output none
+    Test-LastCommand "create leases container"
+}
+
+# 7. Connection details go into the Seeder's user secrets, never into appsettings.json.
 $endpoint = az cosmosdb show --name $accountName --resource-group $resourceGroup --query documentEndpoint -o tsv
 Test-LastCommand "read account endpoint"
 $key = az cosmosdb keys list --name $accountName --resource-group $resourceGroup --query primaryMasterKey -o tsv
@@ -133,6 +157,7 @@ dotnet user-secrets set "Cosmos:Endpoint" $endpoint --project MeepleLedger.Seede
 dotnet user-secrets set "Cosmos:Key" $key --project MeepleLedger.Seeder | Out-Null
 dotnet user-secrets set "Cosmos:Database" $databaseName --project MeepleLedger.Seeder | Out-Null
 dotnet user-secrets set "Cosmos:Container" $containerName --project MeepleLedger.Seeder | Out-Null
+dotnet user-secrets set "Cosmos:LeaseContainer" $leaseContainerName --project MeepleLedger.Seeder | Out-Null
 
 Write-Host ""
 Write-Host "Done."
@@ -140,4 +165,5 @@ Write-Host "  Resource group: $resourceGroup"
 Write-Host "  Account:        $accountName"
 Write-Host "  Endpoint:       $endpoint"
 Write-Host "  Container:      $databaseName/$containerName (partition key $partitionKeyPath)"
-Write-Host "  User secrets:   Cosmos:Endpoint, Cosmos:Key, Cosmos:Database, Cosmos:Container on MeepleLedger.Seeder"
+Write-Host "  Leases:         $databaseName/$leaseContainerName (partition key /id)"
+Write-Host "  User secrets:   Cosmos:Endpoint, Cosmos:Key, Cosmos:Database, Cosmos:Container, Cosmos:LeaseContainer on MeepleLedger.Seeder"
