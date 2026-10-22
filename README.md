@@ -460,3 +460,36 @@ connection and the network; "later" is rounds 2 to 5):
   6 replicas x 20 would pass 35. If PgBouncer goes in front, in transaction mode an Ask can land on a
   different server connection from the one its statement was prepared on, so set
   `Postgres:PrepareStatements` to `false` first.
+
+### Azure Managed Redis (A-15)
+
+```
+pwsh infra/redis/provision-redis.ps1
+dotnet run --project MeepleLedger.Seeder -- ping-redis
+```
+
+The script installs the `redisenterprise` az CLI extension, then creates an Azure Managed Redis
+instance called `meepleledger-redis` in `rg-meepleledger` with the RediSearch module, and saves `Redis:ConnectionString` (StackExchange.Redis format) into the Seeder's user
+secrets. `ping-redis` connects over TLS with [StackExchange.Redis](https://stackexchange.github.io/StackExchange.Redis/),
+checks `PING` returns `PONG`, and runs `MODULE LIST` to confirm the search module is loaded.
+
+| Setting | Value | Why |
+|---|---|---|
+| Product | Azure **Managed** Redis (`az redisenterprise`) | Not Azure Cache for Redis (`az redis`). Different product, different tiers |
+| Region | centralus | eastus2 has no Balanced_B0 capacity for this subscription; the resource group stays in eastus2 |
+| SKU | `Balanced_B0`, 0.5 GB | Smallest SKU. Balanced includes RediSearch; Flash Optimized does not |
+| Clustering policy | `EnterpriseCluster` | The only policy RediSearch works with |
+| Eviction policy | `NoEviction` | Required by RediSearch |
+| Client protocol | `Encrypted`, TLS 1.2+, port 10000 | TLS only: there is no plaintext port |
+| High availability | Disabled | Dev/test only, about half the price. Can be turned on later, never off |
+| Auth | Access keys enabled | Managed Redis defaults to Entra ID only; a key keeps it a plain secret |
+
+- **Modules, clustering policy and eviction policy are fixed at creation.** Getting one wrong means
+  deleting and recreating the instance, so the script reads them back and warns if they differ.
+- **It is clustered, even though it looks like it isn't.** The Enterprise policy puts a proxy in front
+  of the shards, so the client sees one standalone server (`ping-redis` prints `Standalone`). Multi-key
+  commands other than `DEL`, `MSET`, `MGET`, `EXISTS`, `UNLINK` and `TOUCH` can still fail with
+  `CROSSSLOT`, which A-16 and A-17 have to key around.
+- **It bills every hour it exists.** There is no serverless option and no stop. If you are pausing
+  for more than a day, delete it and run the script again later:
+  `az redisenterprise delete --cluster-name meepleledger-redis --resource-group rg-meepleledger --yes`.

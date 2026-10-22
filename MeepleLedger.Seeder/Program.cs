@@ -13,6 +13,7 @@ using Newtonsoft.Json.Linq;
 using Npgsql;
 using Pgvector;
 using Pgvector.Npgsql;
+using StackExchange.Redis;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -84,6 +85,11 @@ if (args.FirstOrDefault() == "explain-postgres")
 if (args.FirstOrDefault() == "load-postgres")
 {
     return await LoadPostgres();
+}
+
+if (args.FirstOrDefault() == "ping-redis")
+{
+    return await PingRedis();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -2554,6 +2560,94 @@ static async Task<int> LoadPostgres()
     Console.WriteLine();
     Console.WriteLine("Times are per Ask from this machine: waiting for a connection + the queries + the network.");
     Console.WriteLine($"Round 1 opens connections; 'Later' is rounds 2 to {rounds} together.");
+    return 0;
+}
+
+// Connects to Azure Managed Redis over TLS and checks it is ready for A-16 and A-17 (A-15):
+// PING must return PONG, and MODULE LIST must include the search module (named "search" by the
+// server, "RediSearch" in Azure). Also prints how the client sees the topology: with the Enterprise
+// clustering policy it looks like one standalone server even though it is sharded inside.
+static async Task<int> PingRedis()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Redis:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Redis:ConnectionString");
+        Console.WriteLine("(pwsh infra/redis/provision-redis.ps1 sets it).");
+        return 1;
+    }
+
+    ConfigurationOptions options = ConfigurationOptions.Parse(connectionString);
+    if (!options.Ssl)
+    {
+        Console.WriteLine("The connection string does not have ssl=True. The instance only accepts TLS.");
+        return 1;
+    }
+
+    await using ConnectionMultiplexer redis = await ConnectionMultiplexer.ConnectAsync(options);
+    IDatabase database = redis.GetDatabase();
+
+    // PING sent as a raw command so we see the server's literal reply, not just a round-trip time
+    RedisResult pingReply = await database.ExecuteAsync("PING");
+    string pingText = pingReply.ToString() ?? "";
+    Console.WriteLine($"PING:              {pingText}");
+    if (pingText != "PONG")
+    {
+        Console.WriteLine("Expected PONG.");
+        return 1;
+    }
+
+    TimeSpan roundTrip = await database.PingAsync();
+    Console.WriteLine($"round trip:        {roundTrip.TotalMilliseconds:F1} ms");
+
+    EndPoint[] endpoints = redis.GetEndPoints();
+    IServer server = redis.GetServer(endpoints[0]);
+    Console.WriteLine($"endpoint:          {endpoints[0]}");
+    Console.WriteLine($"server type:       {server.ServerType} (EnterpriseCluster shows as Standalone)");
+    Console.WriteLine($"redis version:     {server.Version}");
+
+    // MODULE LIST returns one array per module: [name, <name>, ver, <version>, ...]
+    RedisResult modulesReply = await database.ExecuteAsync("MODULE", "LIST");
+    RedisResult[] modules = (RedisResult[])modulesReply!;
+    bool hasSearch = false;
+    Console.WriteLine("modules:");
+    foreach (RedisResult module in modules)
+    {
+        RedisResult[] fields = (RedisResult[])module!;
+        string name = "";
+        string version = "";
+        for (int i = 0; i + 1 < fields.Length; i += 2)
+        {
+            string fieldName = fields[i].ToString() ?? "";
+            if (fieldName == "name")
+            {
+                name = fields[i + 1].ToString() ?? "";
+            }
+            if (fieldName == "ver")
+            {
+                version = fields[i + 1].ToString() ?? "";
+            }
+        }
+        Console.WriteLine($"  {name,-16} ver {version}");
+
+        if (name.ToLower() == "search" || name.ToLower() == "ft")
+        {
+            hasSearch = true;
+        }
+    }
+
+    if (!hasSearch)
+    {
+        Console.WriteLine("The search module is not loaded. Modules can only be added when the instance is");
+        Console.WriteLine("created: delete it and run pwsh infra/redis/provision-redis.ps1 again.");
+        return 1;
+    }
+
+    Console.WriteLine("RediSearch is available.");
     return 0;
 }
 
