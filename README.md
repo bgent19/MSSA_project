@@ -594,3 +594,44 @@ must be reloaded from the other stores. Cosmos and Postgres pay for durable stor
 - **Redis:** when the lowest, steadiest latency at high query rates matters more than durability, and
   the vectors are a copy of data held durably elsewhere. You pay for the whole dataset in memory, by
   the hour, whether or not anyone asks.
+
+### Azure Service Bus (A-18)
+
+```
+pwsh infra/servicebus/provision-servicebus.ps1
+```
+
+The script creates a Standard tier namespace called `meepleledger-bus` in `rg-meepleledger` (eastus2),
+with one queue and one topic, and saves `ServiceBus:ConnectionString` into the Seeder's user secrets.
+The queue is for *work I want done*: one embed request, handled by exactly one worker (A-19, A-21,
+A-27). The topic is for *something happened*: every subscription whose filter matches gets its own
+copy of the event.
+
+| Setting | Value | Why |
+|---|---|---|
+| Tier | Standard | Basic has queues but no topics or subscriptions |
+| Queue | `embed-requests` | Work queue for the embedding pipeline |
+| Max delivery count | 5 (default 10) | Any receive that does not Complete counts. After 5 the message is dead-lettered (`MaxDeliveryCountExceeded`). Throttling is already retried inside one attempt, so 5 failed attempts means a poison message, and 10 would only make it slower to show up |
+| Lock duration | 1 minute | One embed is a few seconds. A crashed worker's message goes back to the queue within a minute. The cap is 5 minutes: long work renews the lock (A-19) |
+| Message TTL | 1 day | A request nobody handled in a day means the worker is down |
+| Dead-letter on expiration | On | An expired request moves to the dead-letter queue (`TTLExpiredException`) where it can be resubmitted, instead of being dropped and leaving a stale vector |
+| Topic | `meeple-events` | Domain events. The event name goes in the message Subject (`Label` in the CLI, `sys.Label` in SQL filters) |
+| Subscription `embedding` | Correlation filter: `Label = BlurbChanged` | A new Blurb means a new vector. An exact match on one property is the cheapest filter |
+| Subscription `recommendation-cache` | SQL filter: `sys.Label IN ('BlurbChanged', 'GameAdded', 'GameRemoved')` | Anything that changes which Games a Recommendation can hold. `PlayLogged` is left out on purpose: it goes over Event Grid (A-20) |
+| Auth | Rule `meepleledger-app`, Send + Listen | `RootManageSharedAccessKey` can also create and delete entities, which no client needs |
+
+Both subscriptions use the same delivery count, lock, TTL and dead-letter settings as the queue.
+
+- **A subscription with no rule of its own gets everything.** A new subscription comes with a
+  `$Default` rule (`1=1`), and adding a second rule does not replace it: rules are OR'ed. The script
+  adds its own rule and then deletes `$Default`, and warns if `$Default` ever comes back.
+- **Re-running is safe** and re-applies the queue and subscription settings, so the portal can't
+  quietly drift from this file. Changing a filter means deleting the old rule by hand first: the
+  script only adds a rule that isn't there.
+- **Check it before writing code:** in the portal, open `meepleledger-bus` > Queues > `embed-requests`
+  > Service Bus Explorer, send a message, then *Peek from start*. A peek does not lock or remove the
+  message. On the topic, send one message with Label `BlurbChanged` and one with `PlayLogged`: the
+  first should land in both subscriptions, the second in neither.
+- **It bills every hour it exists** (Standard has a small base charge) and has no stop. A-33 deletes
+  `rg-meepleledger`, which takes it with it; to remove only the namespace:
+  `az servicebus namespace delete --name meepleledger-bus --resource-group rg-meepleledger`.
