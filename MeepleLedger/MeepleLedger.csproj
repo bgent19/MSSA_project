@@ -21,4 +21,12 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
+  <!-- A-13: the PostgreSQL Search Index Provider. Npgsql is the driver; Pgvector brings the
+       vector type mapping (UseVector, in the Pgvector.Npgsql namespace), so an Ask's embedding is
+       sent as a real vector parameter. Same versions as MeepleLedger.Seeder. -->
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Pgvector" Version="0.3.2" />
+  </ItemGroup>
+
 </Project>

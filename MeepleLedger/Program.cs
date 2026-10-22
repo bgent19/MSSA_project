@@ -1,6 +1,8 @@
 using MeepleLedger.Components;
 using MeepleLedger.Storage;
 using Microsoft.Azure.Cosmos;
+using Npgsql;
+using Pgvector.Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,8 +14,9 @@ builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
 builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
 
 // Which Search Index Provider is live. InMemory is the default and needs nothing (ADR-0001);
-// Cosmos needs the Cosmos:* and AzureOpenAI:* settings (user secrets in Development).
-// Switch with: dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos
+// Cosmos needs the Cosmos:* and AzureOpenAI:* settings, Postgres needs Postgres:ConnectionString
+// and AzureOpenAI:* (user secrets in Development).
+// Switch with: dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos (or Postgres)
 string searchProvider = builder.Configuration["SearchIndex:Provider"] ?? "InMemory";
 
 if (searchProvider == "InMemory")
@@ -47,9 +50,29 @@ else if (searchProvider == "Cosmos")
 
     builder.Services.AddSingleton<IGameSearchIndex, CosmosGameSearchIndex>();
 }
+else if (searchProvider == "Postgres")
+{
+    IConfiguration config = builder.Configuration;
+
+    // NpgsqlDataSource owns the connection pool, so there is exactly one for the whole app.
+    // UseVector maps pgvector's vector type, so the Ask's embedding is sent as a parameter.
+    builder.Services.AddSingleton(services =>
+    {
+        NpgsqlDataSourceBuilder dataSourceBuilder = new NpgsqlDataSourceBuilder(RequiredSetting(config, "Postgres:ConnectionString"));
+        dataSourceBuilder.UseVector();
+        return dataSourceBuilder.Build();
+    });
+
+    builder.Services.AddSingleton(services => new AskEmbedder(
+        RequiredSetting(config, "AzureOpenAI:Endpoint"),
+        RequiredSetting(config, "AzureOpenAI:Key"),
+        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
+
+    builder.Services.AddSingleton<IGameSearchIndex, PostgresGameSearchIndex>();
+}
 else
 {
-    throw new InvalidOperationException("Unknown SearchIndex:Provider '" + searchProvider + "'. Use InMemory or Cosmos.");
+    throw new InvalidOperationException("Unknown SearchIndex:Provider '" + searchProvider + "'. Use InMemory, Cosmos or Postgres.");
 }
 
 var app = builder.Build();
@@ -78,7 +101,7 @@ app.MapRazorComponents<App>()
 
 app.Run();
 
-// Reads a setting the Cosmos Provider cannot run without, and says which one is missing.
+// Reads a setting a cloud Provider cannot run without, and says which one is missing.
 static string RequiredSetting(IConfiguration config, string name)
 {
     string? value = config[name];

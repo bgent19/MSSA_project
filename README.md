@@ -42,7 +42,7 @@ below if you want to regenerate them.
 | Edit a Play | `/plays/{id}/edit` | The same form, filled in with an existing play. |
 | Play Log | `/plays` | Every play, newest first. Filter by game or to games you don't own. Edit or delete a play. |
 | Statistics | `/stats` | Games owned and plays logged, most played games, and games played but not owned. |
-| Tonight | `/tonight` | Type an Ask ("something co-operative with cards"), set players, minutes and owned-only, and get ranked Recommendations with the reason for each. Offline it matches words, not meaning, and says so. With the Cosmos DB Provider it matches by meaning against each game's Blurb. |
+| Tonight | `/tonight` | Type an Ask ("something co-operative with cards"), set players, minutes and owned-only, and get ranked Recommendations with the reason for each. Offline it matches words, not meaning, and says so. With the Cosmos DB or PostgreSQL Provider it matches by meaning against each game's Blurb. |
 
 **Changes are not saved.** The app keeps everything in memory and starts over from the seed data
 each time it launches, so anything you add, edit or delete is gone when the app stops.
@@ -335,3 +335,78 @@ user secrets. Run the script again from a new network to update the firewall rul
   whether or not you use it. Stop it when you are done:
   `az postgres flexible-server stop --name meepleledger-pg --resource-group rg-meepleledger`.
   Azure starts a stopped server again by itself after seven days.
+
+#### The games table and its vector index (A-12)
+
+```
+dotnet run --project MeepleLedger.Seeder -- upload-postgres
+dotnet run --project MeepleLedger.Seeder -- measure-pgvector
+```
+
+`upload-postgres` applies [infra/postgres/games-schema.sql](infra/postgres/games-schema.sql) and
+loads one row per Game from the raw XML, `data/blurbs.json` and `data/vectors.json` (the same Games
+and vectors as `upload-cosmos`). Rows are upserted by name and strays are deleted, so it is safe to
+run again. The schema file explains each column type: categories and mechanics are `text[]`, weight
+is `real` (null = unrated), the Blurb is `text`, and the embedding is `vector(1536)`. B-tree indexes
+cover the Table's filters (player count, playtime).
+
+`measure-pgvector` runs the same nearest-neighbour searches with no vector index (the exact answer),
+with IVFFlat and with HNSW, and prints build time, index size, server execution time and recall
+against the exact answer as a Markdown table. It leaves the HNSW index in place.
+
+- **The operator class must match the operator.** The index is `vector_cosine_ops`, so queries must
+  order by `<=>` (cosine distance). A query using `<->` (L2) still works but silently scans the table.
+- **IVFFlat learns from the rows present at build time**, so it is only ever built after loading.
+  HNSW has no such step, which is why the schema file can create it on an empty table.
+- **At 200 rows the planner prefers a sequential scan** to any index. The measurement turns
+  `enable_seqscan` off for its own session and checks every plan, so an index row really is an
+  index scan. Build time and index size show the difference between the two; latency barely can.
+
+#### Using PostgreSQL from the app (A-13)
+
+Load the games with `upload-postgres`, then start the app with the PostgreSQL Search Index:
+
+```
+dotnet run --project MeepleLedger -- --SearchIndex:Provider=Postgres
+```
+
+It needs the `Postgres:ConnectionString` and `AzureOpenAI:*` user secrets. The Tonight screen
+embeds the Ask with the same `game-embeddings` deployment and runs one query, with the vector
+passed as a parameter (the Pgvector type mapping), never pasted into the SQL:
+
+```sql
+SELECT g.name, g.blurb, g.embedding <=> @askVector AS distance
+FROM games g
+JOIN unnest(@ownedNames) AS owned(name) ON owned.name = g.name   -- only when "Only games on my shelf" is ticked
+WHERE (g.min_players <= 0 OR g.min_players <= @playerCount)
+  AND (g.max_players <= 0 OR g.max_players >= @playerCount)
+  AND (g.playtime_minutes <= 0 OR g.playtime_minutes <= @minutesAvailable)
+ORDER BY g.embedding <=> @askVector
+LIMIT @maxResults
+```
+
+Similarity and the Table are the same query: the Table is the `WHERE`, and owned-only is a join
+against the Collection (sent as an array, because the Collection lives in the app). Each
+Recommendation's Reason quotes the sentence of the Blurb that shares the most words with the Ask,
+or the Blurb's opening sentence when none do.
+
+- **The recall trap.** HNSW walks the graph first and applies the `WHERE` afterwards, so a
+  selective Table can leave fewer than ten rows even though more Games fit. The app raises
+  `hnsw.ef_search` to `Postgres:EfSearch` (100, in `appsettings.json`) for the query, and when an
+  answer still comes back short it runs the query again as an exact scan (`enable_indexscan` off)
+  and logs a warning if that found more. Both settings are `SET LOCAL`, so they end with the query.
+- **Look at the plan.** `explain-postgres` runs `EXPLAIN (ANALYZE, BUFFERS)` on the same query for
+  three Tables (wide, selective, owned-only), each four ways: the planner's choice, HNSW forced at
+  `ef_search` 40 and 100, and exact. Forcing HNSW takes `enable_bitmapscan` off as well as
+  `enable_seqscan`: with a `WHERE`, the planner otherwise goes round the vector index with a bitmap
+  scan on the B-tree indexes. At 200 rows the planner's own choice is always an exact plan (seq or
+  bitmap scan plus a top-N sort, about 1 ms), which is the right call at this size. Forced, HNSW
+  returns 0 of the 2 Games that fit the selective Table (1 player, 30 minutes) at `ef_search` 40
+  and still 0 at 100, which is why the app falls back to an exact scan rather than relying on
+  `ef_search` alone. It prints how many Games fit each Table and how many rows each
+  run returned, so a forced-HNSW run that returns fewer than the exact one is the recall trap seen
+  directly. The query text is a copy of `PostgresGameSearchIndex`'s; keep the two in step.
+
+```
+dotnet run --project MeepleLedger.Seeder -- explain-postgres
+```

@@ -11,6 +11,8 @@ using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
 using Npgsql;
+using Pgvector;
+using Pgvector.Npgsql;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -62,6 +64,21 @@ if (args.FirstOrDefault() == "watch-cosmos")
 if (args.FirstOrDefault() == "setup-postgres")
 {
     return await SetupPostgres();
+}
+
+if (args.FirstOrDefault() == "upload-postgres")
+{
+    return await UploadPostgres();
+}
+
+if (args.FirstOrDefault() == "measure-pgvector")
+{
+    return await MeasurePgvector();
+}
+
+if (args.FirstOrDefault() == "explain-postgres")
+{
+    return await ExplainPostgres();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -1668,6 +1685,717 @@ static async Task<int> SetupPostgres()
     return 0;
 }
 
+// Opens a connection to the Flexible Server with the pgvector type mapping turned on, so a
+// float[] can be sent as a real vector parameter instead of 1536 numbers pasted into the SQL.
+// Returns null (after saying why) when the connection string is missing.
+static NpgsqlDataSource? CreatePostgresDataSource()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Postgres:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Postgres:ConnectionString");
+        Console.WriteLine("(pwsh infra/postgres/provision-postgres.ps1 sets it).");
+        return null;
+    }
+
+    NpgsqlDataSourceBuilder builder = new NpgsqlDataSourceBuilder(connectionString);
+    builder.UseVector();
+    return builder.Build();
+}
+
+// Creates the games table from infra/postgres/games-schema.sql and loads one row per Game from the
+// raw XML, data/blurbs.json and data/vectors.json (A-12). The same Games, facts and vectors as
+// upload-cosmos. Safe to run again: rows are upserted by name, and any row that is not one of
+// these Games is deleted, so a search never returns a stray. Metered (the server bills while it runs).
+static async Task<int> UploadPostgres()
+{
+    string schemaFile = "infra/postgres/games-schema.sql";
+    string blurbFile = "data/blurbs.json";
+    string vectorFile = "data/vectors.json";
+
+    if (!File.Exists(vectorFile))
+    {
+        Console.WriteLine($"{vectorFile} not found. Run the embed step first.");
+        return 1;
+    }
+
+    var vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
+
+    var blurbs = new Dictionary<string, string>();
+    if (File.Exists(blurbFile))
+    {
+        blurbs = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(blurbFile))!;
+    }
+
+    // The same game facts emit writes into CatalogSeed.cs, read from the same raw XML
+    List<PostgresGameRow> rows = [];
+    int noVector = 0;
+
+    foreach (var batchFile in Directory.GetFiles("raw", "thing-batch-*.xml"))
+    {
+        foreach (var item in XDocument.Load(batchFile).Root!.Elements("item"))
+        {
+            string name = item.Elements("name")
+                              .First(n => (string?)n.Attribute("type") == "primary")
+                              .Attribute("value")!.Value;
+
+            int maxPlayers = int.Parse(item.Element("maxplayers")!.Attribute("value")!.Value);
+
+            // emit drops these too, so they are not in the Catalog
+            if (maxPlayers < 1)
+            {
+                continue;
+            }
+
+            if (!vectors.ContainsKey(name))
+            {
+                Console.WriteLine($"no vector for '{name}', skipped. Run the embed step.");
+                noVector++;
+                continue;
+            }
+
+            // Same rule as emit: absent or 0 means unrated, not light
+            float? weight = null;
+            string? weightText = item.Element("statistics")?.Element("ratings")?
+                                     .Element("averageweight")?.Attribute("value")?.Value;
+            if (float.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) && w > 0)
+            {
+                weight = w;
+            }
+
+            string? blurb = null;
+            if (blurbs.ContainsKey(name))
+            {
+                blurb = blurbs[name];
+            }
+
+            string designer = item.Elements("link")
+                                  .FirstOrDefault(l => (string?)l.Attribute("type") == "boardgamedesigner")?
+                                  .Attribute("value")?.Value ?? "Unknown";
+
+            rows.Add(new PostgresGameRow
+            {
+                Name = name,
+                Designer = designer,
+                MinPlayers = int.Parse(item.Element("minplayers")!.Attribute("value")!.Value),
+                MaxPlayers = maxPlayers,
+                PlaytimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value),
+                Categories = LinkValues(item, "boardgamecategory"),
+                Mechanics = LinkValues(item, "boardgamemechanic"),
+                Weight = weight,
+                Blurb = blurb,
+                Embedding = vectors[name].Vector,
+                EmbeddingTextHash = vectors[name].Hash,
+            });
+        }
+    }
+
+    Console.WriteLine($"{rows.Count} games to upsert ({noVector} skipped for want of a vector)");
+
+    NpgsqlDataSource? dataSource = CreatePostgresDataSource();
+    if (dataSource == null)
+    {
+        return 1;
+    }
+
+    await using (dataSource)
+    {
+        await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+
+        // The schema file holds several statements; Npgsql sends them as one batch
+        await using (NpgsqlCommand schema = new(File.ReadAllText(schemaFile), connection))
+        {
+            await schema.ExecuteNonQueryAsync();
+        }
+
+        // If the schema file just created the extension, this connection opened before the vector
+        // type existed and cannot map it yet. Reloading the types fixes that.
+        await connection.ReloadTypesAsync();
+        Console.WriteLine($"schema applied from {schemaFile}");
+
+        // One transaction, so a failure part-way leaves the table as it was
+        await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync();
+
+        string upsertSql = """
+            INSERT INTO games (name, designer, min_players, max_players, playtime_minutes,
+                               categories, mechanics, weight, blurb, embedding, embedding_text_hash)
+            VALUES (@name, @designer, @minPlayers, @maxPlayers, @playtimeMinutes,
+                    @categories, @mechanics, @weight, @blurb, @embedding, @embeddingTextHash)
+            ON CONFLICT (name) DO UPDATE SET
+                designer = EXCLUDED.designer,
+                min_players = EXCLUDED.min_players,
+                max_players = EXCLUDED.max_players,
+                playtime_minutes = EXCLUDED.playtime_minutes,
+                categories = EXCLUDED.categories,
+                mechanics = EXCLUDED.mechanics,
+                weight = EXCLUDED.weight,
+                blurb = EXCLUDED.blurb,
+                embedding = EXCLUDED.embedding,
+                embedding_text_hash = EXCLUDED.embedding_text_hash
+            """;
+
+        var names = new List<string>();
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            PostgresGameRow row = rows[i];
+
+            await using NpgsqlCommand upsert = new(upsertSql, connection, transaction);
+            upsert.Parameters.AddWithValue("name", row.Name);
+            upsert.Parameters.AddWithValue("designer", row.Designer);
+            upsert.Parameters.AddWithValue("minPlayers", row.MinPlayers);
+            upsert.Parameters.AddWithValue("maxPlayers", row.MaxPlayers);
+            upsert.Parameters.AddWithValue("playtimeMinutes", row.PlaytimeMinutes);
+            upsert.Parameters.AddWithValue("categories", row.Categories.ToArray());
+            upsert.Parameters.AddWithValue("mechanics", row.Mechanics.ToArray());
+
+            // A null has no type of its own, so DBNull stands in for an unrated weight or a missing Blurb
+            if (row.Weight == null)
+            {
+                upsert.Parameters.AddWithValue("weight", NpgsqlTypes.NpgsqlDbType.Real, DBNull.Value);
+            }
+            else
+            {
+                upsert.Parameters.AddWithValue("weight", row.Weight.Value);
+            }
+
+            if (row.Blurb == null)
+            {
+                upsert.Parameters.AddWithValue("blurb", NpgsqlTypes.NpgsqlDbType.Text, DBNull.Value);
+            }
+            else
+            {
+                upsert.Parameters.AddWithValue("blurb", row.Blurb);
+            }
+
+            upsert.Parameters.AddWithValue("embedding", new Vector(row.Embedding));
+            upsert.Parameters.AddWithValue("embeddingTextHash", row.EmbeddingTextHash);
+            await upsert.ExecuteNonQueryAsync();
+
+            names.Add(row.Name);
+
+            if ((i + 1) % 20 == 0 || i == rows.Count - 1)
+            {
+                Console.WriteLine($"[{i + 1}/{rows.Count}] upserted");
+            }
+        }
+
+        // Delete anything that is not one of these Games
+        await using (NpgsqlCommand deleteStrays = new("DELETE FROM games WHERE NOT (name = ANY(@names))", connection, transaction))
+        {
+            deleteStrays.Parameters.AddWithValue("names", names.ToArray());
+            int deleted = await deleteStrays.ExecuteNonQueryAsync();
+            if (deleted > 0)
+            {
+                Console.WriteLine($"deleted {deleted} stray row(s)");
+            }
+        }
+
+        await transaction.CommitAsync();
+
+        // Fresh statistics, so the planner knows how many rows there are when it picks a plan
+        await using (NpgsqlCommand analyze = new("ANALYZE games", connection))
+        {
+            await analyze.ExecuteNonQueryAsync();
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"upserted {rows.Count} games into {connection.Database}.games");
+    }
+
+    return 0;
+}
+
+// Compares the two pgvector index types against an exact search for A-12, and prints a table to
+// paste into the ticket. Needs the rows loaded first (upload-postgres). Metered.
+//
+// It runs the same nearest-neighbour searches four ways:
+//   1. with no vector index at all: a sequential scan, exact, the ceiling for recall
+//   2. with an IVFFlat index, at two ivfflat.probes settings
+//   3. with an HNSW index, at two hnsw.ef_search settings
+// Recall is each run's top 10 compared with the sequential scan's top 10 for the same search.
+// The searches use a sample of the Games' own vectors as the query, so no embeddings calls are made.
+//
+// It leaves the HNSW index in place (the A-12 decision) and the IVFFlat index dropped, the same
+// state games-schema.sql creates.
+static async Task<int> MeasurePgvector()
+{
+    int resultsPerSearch = 10;
+    int searchesRepeated = 3;   // each search is timed this many times and averaged
+
+    NpgsqlDataSource? dataSource = CreatePostgresDataSource();
+    if (dataSource == null)
+    {
+        return 1;
+    }
+
+    await using (dataSource)
+    {
+        await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+
+        // Every 10th Game by name becomes a search
+        var queryNames = new List<string>();
+        var queryVectors = new List<Vector>();
+        int rowCount = 0;
+
+        await using (NpgsqlCommand select = new("SELECT name, embedding FROM games ORDER BY name", connection))
+        await using (NpgsqlDataReader reader = await select.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+            {
+                if (rowCount % 10 == 0)
+                {
+                    queryNames.Add(reader.GetString(0));
+                    queryVectors.Add(reader.GetFieldValue<Vector>(1));
+                }
+                rowCount++;
+            }
+        }
+
+        if (rowCount == 0)
+        {
+            Console.WriteLine("The games table is empty. Run upload-postgres first.");
+            return 1;
+        }
+
+        Console.WriteLine($"{rowCount} games, {queryVectors.Count} searches, top {resultsPerSearch}, each timed {searchesRepeated} times");
+
+        var report = new List<string>();
+        report.Add("| Search | Build time | Index size | Avg execution | Recall@10 | Plan |");
+        report.Add("|---|---|---|---|---|---|");
+
+        // 1. No vector index: the exact answer
+        await ExecutePostgres(connection, "DROP INDEX IF EXISTS games_embedding_hnsw");
+        await ExecutePostgres(connection, "DROP INDEX IF EXISTS games_embedding_ivfflat");
+
+        var exactResults = new List<List<string>>();
+        for (int i = 0; i < queryVectors.Count; i++)
+        {
+            exactResults.Add(await SearchPostgres(connection, queryVectors[i], resultsPerSearch));
+        }
+
+        PgvectorRun exactRun = await MeasurePostgresSearches(connection, queryVectors, exactResults, resultsPerSearch, searchesRepeated, "Seq Scan");
+        report.Add($"| Sequential scan (no index) | - | - | {exactRun.AverageMs:0.000} ms | {exactRun.Recall:P0} | {exactRun.PlanSummary} |");
+
+        long tableBytes = await ScalarPostgres<long>(connection, "SELECT pg_table_size('games')");
+
+        // At this row count the planner would rather scan 200 rows than use any index, which would
+        // make every index run below secretly a sequential scan. Turning seq scans off for this
+        // session forces the index, and the plan check confirms it.
+        await ExecutePostgres(connection, "SET enable_seqscan = off");
+
+        // 2. IVFFlat. pgvector suggests lists = rows / 1000 below a million rows, which gives 1 list
+        //    here: one cluster holding every row, an index in name only. sqrt(rows) gives about 14
+        //    clusters, enough to see probes trade recall for speed. Built after the rows are loaded,
+        //    because its centroids come from the rows present at build time.
+        int lists = (int)Math.Round(Math.Sqrt(rowCount));
+        Console.WriteLine($"building IVFFlat (lists = {lists})...");
+        double ivfflatBuildMs = await TimePostgres(connection,
+            $"CREATE INDEX games_embedding_ivfflat ON games USING ivfflat (embedding vector_cosine_ops) WITH (lists = {lists})");
+        long ivfflatBytes = await ScalarPostgres<long>(connection, "SELECT pg_relation_size('games_embedding_ivfflat')");
+
+        int[] probeSettings = [1, (int)Math.Ceiling(Math.Sqrt(lists))];
+        foreach (int probes in probeSettings)
+        {
+            await ExecutePostgres(connection, $"SET ivfflat.probes = {probes}");
+            PgvectorRun run = await MeasurePostgresSearches(connection, queryVectors, exactResults, resultsPerSearch, searchesRepeated, "games_embedding_ivfflat");
+            report.Add($"| IVFFlat lists={lists}, probes={probes} | {ivfflatBuildMs:0} ms | {FormatBytes(ivfflatBytes)} | {run.AverageMs:0.000} ms | {run.Recall:P0} | {run.PlanSummary} |");
+        }
+
+        await ExecutePostgres(connection, "RESET ivfflat.probes");
+        await ExecutePostgres(connection, "DROP INDEX games_embedding_ivfflat");
+
+        // 3. HNSW, at pgvector's default build settings (the same as games-schema.sql)
+        Console.WriteLine("building HNSW (m = 16, ef_construction = 64)...");
+        double hnswBuildMs = await TimePostgres(connection,
+            "CREATE INDEX games_embedding_hnsw ON games USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)");
+        long hnswBytes = await ScalarPostgres<long>(connection, "SELECT pg_relation_size('games_embedding_hnsw')");
+
+        // ef_search is the candidate list size: 40 is the default, 10 is the least that can still
+        // return 10 results
+        int[] efSearchSettings = [10, 40];
+        foreach (int efSearch in efSearchSettings)
+        {
+            await ExecutePostgres(connection, $"SET hnsw.ef_search = {efSearch}");
+            PgvectorRun run = await MeasurePostgresSearches(connection, queryVectors, exactResults, resultsPerSearch, searchesRepeated, "games_embedding_hnsw");
+            report.Add($"| HNSW m=16, ef_construction=64, ef_search={efSearch} | {hnswBuildMs:0} ms | {FormatBytes(hnswBytes)} | {run.AverageMs:0.000} ms | {run.Recall:P0} | {run.PlanSummary} |");
+        }
+
+        await ExecutePostgres(connection, "RESET hnsw.ef_search");
+        await ExecutePostgres(connection, "RESET enable_seqscan");
+
+        Console.WriteLine();
+        foreach (string line in report)
+        {
+            Console.WriteLine(line);
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Table data (heap + TOAST, no indexes): {FormatBytes(tableBytes)}");
+        Console.WriteLine("Build time is measured from this machine, so it includes one round trip to the server.");
+        Console.WriteLine("Avg execution is the server's own Execution Time from EXPLAIN ANALYZE, with no network in it.");
+        Console.WriteLine("Left in place: games_embedding_hnsw. Dropped: games_embedding_ivfflat.");
+    }
+
+    return 0;
+}
+
+// The nearest-neighbour search A-12 measures: the closest Games by cosine distance (<=>), which is
+// the operator vector_cosine_ops indexes. Returns the names in order, nearest first.
+static async Task<List<string>> SearchPostgres(NpgsqlConnection connection, Vector queryVector, int resultsPerSearch)
+{
+    var names = new List<string>();
+
+    await using NpgsqlCommand search = new("SELECT name FROM games ORDER BY embedding <=> @query LIMIT @limit", connection);
+    search.Parameters.AddWithValue("query", queryVector);
+    search.Parameters.AddWithValue("limit", resultsPerSearch);
+
+    await using NpgsqlDataReader reader = await search.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+    {
+        names.Add(reader.GetString(0));
+    }
+
+    return names;
+}
+
+// Runs every search under the current settings: once for its results (to score recall against the
+// exact results) and several times under EXPLAIN ANALYZE for the server's execution time and plan.
+// expectedPlan is the text the plan should contain: an index name, or "Seq Scan".
+static async Task<PgvectorRun> MeasurePostgresSearches(NpgsqlConnection connection, List<Vector> queryVectors,
+    List<List<string>> exactResults, int resultsPerSearch, int searchesRepeated, string expectedPlan)
+{
+    double totalMs = 0;
+    int timings = 0;
+    int found = 0;
+    int plansAsExpected = 0;
+
+    for (int i = 0; i < queryVectors.Count; i++)
+    {
+        // Recall: how many of the exact top 10 this run also returned
+        List<string> names = await SearchPostgres(connection, queryVectors[i], resultsPerSearch);
+        foreach (string name in names)
+        {
+            if (exactResults[i].Contains(name))
+            {
+                found++;
+            }
+        }
+
+        for (int repeat = 0; repeat < searchesRepeated; repeat++)
+        {
+            await using NpgsqlCommand explain = new("EXPLAIN ANALYZE SELECT name FROM games ORDER BY embedding <=> @query LIMIT @limit", connection);
+            explain.Parameters.AddWithValue("query", queryVectors[i]);
+            explain.Parameters.AddWithValue("limit", resultsPerSearch);
+
+            bool planAsExpected = false;
+
+            // EXPLAIN ANALYZE returns the plan as rows of text. The last one reads
+            // "Execution Time: 0.123 ms".
+            await using NpgsqlDataReader reader = await explain.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                string line = reader.GetString(0).Trim();
+
+                if (line.Contains(expectedPlan))
+                {
+                    planAsExpected = true;
+                }
+
+                if (line.StartsWith("Execution Time:"))
+                {
+                    string number = line.Replace("Execution Time:", "").Replace("ms", "").Trim();
+                    totalMs += double.Parse(number, CultureInfo.InvariantCulture);
+                    timings++;
+                }
+            }
+
+            if (planAsExpected)
+            {
+                plansAsExpected++;
+            }
+        }
+    }
+
+    PgvectorRun run = new PgvectorRun();
+    run.AverageMs = totalMs / Math.Max(1, timings);
+    run.Recall = (double)found / (queryVectors.Count * resultsPerSearch);
+
+    int totalPlans = queryVectors.Count * searchesRepeated;
+    if (plansAsExpected == totalPlans)
+    {
+        run.PlanSummary = $"{expectedPlan} in every plan";
+    }
+    else
+    {
+        // The index was not used for some searches, so those timings and results are a seq scan's
+        run.PlanSummary = $"WARNING: {expectedPlan} in only {plansAsExpected} of {totalPlans} plans";
+    }
+
+    return run;
+}
+
+// Runs EXPLAIN ANALYZE on the Tonight query of PostgresGameSearchIndex (A-13) for three Tables, to
+// see whether the vector index is really used and whether a filter costs results. Metered.
+//
+// For each Table it prints how many Games fit, then runs the query four ways:
+//   planner's choice       the server's own plan choice, at the app's ef_search (Postgres:EfSearch)
+//   HNSW, ef_search=40     enable_seqscan and enable_bitmapscan off, so the vector index is forced,
+//                          at pgvector's default. Seq scan alone is not enough: with a WHERE, the
+//                          planner goes round it with a bitmap scan on the B-tree indexes.
+//   HNSW, ef_search=100    the same at the app's setting
+//   exact                  enable_indexscan off: the app's fallback when an answer comes back short
+// A forced-HNSW run that returns fewer rows than the exact run is the filtered-ANN recall trap.
+// The query vector is a Game's own vector, so no embeddings call is made.
+static async Task<int> ExplainPostgres()
+{
+    int maxResults = 10;
+
+    NpgsqlDataSource? dataSource = CreatePostgresDataSource();
+    if (dataSource == null)
+    {
+        return 1;
+    }
+
+    // The owned names, as the app's Collection has them (CollectionSeed is emitted from this file)
+    var ownedNames = new List<string>();
+    foreach (var item in XDocument.Load("raw/collection-owned.xml").Root!.Elements("item"))
+    {
+        ownedNames.Add(item.Elements("name").First().Value);
+    }
+
+    await using (dataSource)
+    {
+        await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+
+        Vector? queryVector = null;
+        string queryName = "";
+        await using (NpgsqlCommand select = new("SELECT name, embedding FROM games ORDER BY name LIMIT 1", connection))
+        await using (NpgsqlDataReader reader = await select.ExecuteReaderAsync())
+        {
+            if (await reader.ReadAsync())
+            {
+                queryName = reader.GetString(0);
+                queryVector = reader.GetFieldValue<Vector>(1);
+            }
+        }
+
+        if (queryVector == null)
+        {
+            Console.WriteLine("The games table is empty. Run upload-postgres first.");
+            return 1;
+        }
+
+        Console.WriteLine($"query vector: the embedding of '{queryName}', top {maxResults}, {ownedNames.Count} owned Games");
+
+        var tables = new List<ExplainTable>
+        {
+            new ExplainTable { Label = "4 players, 120 minutes, whole Catalog", PlayerCount = 4, MinutesAvailable = 120, OwnedOnly = false },
+            new ExplainTable { Label = "1 player, 30 minutes, whole Catalog (selective)", PlayerCount = 1, MinutesAvailable = 30, OwnedOnly = false },
+            new ExplainTable { Label = "3 players, 120 minutes, owned only", PlayerCount = 3, MinutesAvailable = 120, OwnedOnly = true },
+        };
+
+        // Each run: a label, then pairs of setting name and value for SET LOCAL
+        var runs = new List<string[]>
+        {
+            new[] { "planner's choice", "hnsw.ef_search", "100" },
+            new[] { "HNSW, ef_search=40", "hnsw.ef_search", "40", "enable_seqscan", "off", "enable_bitmapscan", "off" },
+            new[] { "HNSW, ef_search=100", "hnsw.ef_search", "100", "enable_seqscan", "off", "enable_bitmapscan", "off" },
+            new[] { "exact", "enable_indexscan", "off" },
+        };
+
+        foreach (ExplainTable table in tables)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"=== {table.Label} ===");
+
+            await using (NpgsqlCommand count = new(TonightSql(table.OwnedOnly, countOnly: true), connection))
+            {
+                AddTonightParameters(count, queryVector, table, ownedNames, maxResults);
+                long fits = (long)(await count.ExecuteScalarAsync())!;
+                Console.WriteLine($"{fits} Games fit this Table");
+            }
+
+            foreach (string[] run in runs)
+            {
+                // Each run is its own transaction, so its SET LOCAL settings end with it
+                await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync();
+
+                for (int i = 1; i + 1 < run.Length; i += 2)
+                {
+                    await using NpgsqlCommand set = new("SELECT set_config(@name, @value, true)", connection, transaction);
+                    set.Parameters.AddWithValue("name", run[i]);
+                    set.Parameters.AddWithValue("value", run[i + 1]);
+                    await set.ExecuteNonQueryAsync();
+                }
+
+                await using NpgsqlCommand explain = new("EXPLAIN (ANALYZE, BUFFERS) " + TonightSql(table.OwnedOnly, countOnly: false), connection, transaction);
+                AddTonightParameters(explain, queryVector, table, ownedNames, maxResults);
+
+                var planLines = new List<string>();
+                await using (NpgsqlDataReader reader = await explain.ExecuteReaderAsync())
+                {
+                    while (await reader.ReadAsync())
+                    {
+                        planLines.Add(reader.GetString(0));
+                    }
+                }
+
+                await transaction.RollbackAsync();
+
+                // The scan nodes say how the rows were found, e.g. "Index Scan using games_embedding_hnsw on games g"
+                var scans = new List<string>();
+                string executionTime = "?";
+                foreach (string line in planLines)
+                {
+                    string node = line.Trim();
+                    if (node.StartsWith("->"))
+                    {
+                        node = node.Substring(2).Trim();
+                    }
+
+                    if (node.Contains("Scan") && node.Contains(" on "))
+                    {
+                        string scan = node.Split("  (")[0];
+                        if (!scans.Contains(scan))
+                        {
+                            scans.Add(scan);
+                        }
+                    }
+
+                    if (line.Trim().StartsWith("Execution Time:"))
+                    {
+                        executionTime = line.Trim().Replace("Execution Time:", "").Trim();
+                    }
+                }
+
+                // The top node (Limit) reads "(actual time=... rows=N loops=1)": N is what the query returned
+                string rowsReturned = "?";
+                int actualAt = planLines[0].IndexOf("actual");
+                if (actualAt >= 0)
+                {
+                    int rowsAt = planLines[0].IndexOf("rows=", actualAt);
+                    if (rowsAt >= 0)
+                    {
+                        rowsReturned = planLines[0].Substring(rowsAt + 5).Split(' ')[0];
+                    }
+                }
+
+                Console.WriteLine($"{run[0],-22} {rowsReturned,4} rows  {executionTime,10}  {string.Join(" + ", scans)}");
+
+                // The full plans of the planner's own choice and of forced HNSW, to paste into the ticket
+                if (run[0] == "planner's choice" || run[0] == "HNSW, ef_search=40")
+                {
+                    foreach (string line in planLines)
+                    {
+                        Console.WriteLine("    " + HideVector(line));
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+// EXPLAIN prints the parameter values in the plan, so the query vector shows up as 1536 numbers.
+// This puts "[1536 floats]" in their place.
+static string HideVector(string planLine)
+{
+    int start = planLine.IndexOf("'[");
+    int end = planLine.IndexOf("]'::vector");
+    if (start < 0 || end < start)
+    {
+        return planLine;
+    }
+
+    return planLine.Substring(0, start) + "'[1536 floats]" + planLine.Substring(end + 1);
+}
+
+// A copy of the query in PostgresGameSearchIndex.BuildSql (the Seeder does not reference the web
+// project), so keep the two in step. countOnly swaps the select list for count(*) and drops
+// ORDER BY and LIMIT, to count the Games that fit the Table.
+static string TonightSql(bool ownedOnly, bool countOnly)
+{
+    var sql = new StringBuilder();
+    if (countOnly)
+    {
+        sql.AppendLine("SELECT count(*)");
+    }
+    else
+    {
+        sql.AppendLine("SELECT g.name, g.blurb, g.embedding <=> @askVector AS distance");
+    }
+
+    sql.AppendLine("FROM games g");
+
+    if (ownedOnly)
+    {
+        sql.AppendLine("JOIN unnest(@ownedNames) AS owned(name) ON owned.name = g.name");
+    }
+
+    sql.AppendLine("WHERE (g.min_players <= 0 OR g.min_players <= @playerCount)");
+    sql.AppendLine("  AND (g.max_players <= 0 OR g.max_players >= @playerCount)");
+    sql.AppendLine("  AND (g.playtime_minutes <= 0 OR g.playtime_minutes <= @minutesAvailable)");
+
+    if (!countOnly)
+    {
+        sql.AppendLine("ORDER BY g.embedding <=> @askVector");
+        sql.AppendLine("LIMIT @maxResults");
+    }
+
+    return sql.ToString();
+}
+
+static void AddTonightParameters(NpgsqlCommand command, Vector askVector, ExplainTable table, List<string> ownedNames, int maxResults)
+{
+    // The count query uses neither the vector nor the limit; an unused parameter is harmless
+    command.Parameters.AddWithValue("askVector", askVector);
+    command.Parameters.AddWithValue("playerCount", table.PlayerCount);
+    command.Parameters.AddWithValue("minutesAvailable", table.MinutesAvailable);
+    command.Parameters.AddWithValue("maxResults", maxResults);
+
+    if (table.OwnedOnly)
+    {
+        command.Parameters.AddWithValue("ownedNames", ownedNames.ToArray());
+    }
+}
+
+static async Task ExecutePostgres(NpgsqlConnection connection, string sql)
+{
+    await using NpgsqlCommand command = new(sql, connection);
+    await command.ExecuteNonQueryAsync();
+}
+
+static async Task<T> ScalarPostgres<T>(NpgsqlConnection connection, string sql)
+{
+    await using NpgsqlCommand command = new(sql, connection);
+    object? value = await command.ExecuteScalarAsync();
+    return (T)value!;
+}
+
+// Runs one statement and returns how long it took in milliseconds, seen from this machine
+static async Task<double> TimePostgres(NpgsqlConnection connection, string sql)
+{
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    await ExecutePostgres(connection, sql);
+    stopwatch.Stop();
+    return stopwatch.Elapsed.TotalMilliseconds;
+}
+
+static string FormatBytes(long bytes)
+{
+    if (bytes < 1024 * 1024)
+    {
+        return $"{bytes / 1024.0:0.0} KB";
+    }
+    return $"{bytes / (1024.0 * 1024.0):0.00} MB";
+}
+
 // Split one CSV line on commas, except commas inside double quotes.
 // "Air, Land, & Sea" stays one field, and "" inside quotes is a literal quote.
 static string[] SplitCsvLine(string line)
@@ -1753,6 +2481,39 @@ class CosmosGameDocument
     // The change feed handler compares it with the document's current text to tell a real edit
     // from a write that only replaced the vector (A-10).
     public string? EmbeddingTextHash { get; set; }
+}
+
+// One Game as stored in the PostgreSQL games table (infra/postgres/games-schema.sql)
+class PostgresGameRow
+{
+    public string Name { get; set; } = "";
+    public string Designer { get; set; } = "";
+    public int MinPlayers { get; set; }
+    public int MaxPlayers { get; set; }
+    public int PlaytimeMinutes { get; set; }
+    public List<string> Categories { get; set; } = [];
+    public List<string> Mechanics { get; set; } = [];
+    public float? Weight { get; set; }
+    public string? Blurb { get; set; }
+    public float[] Embedding { get; set; } = [];
+    public string EmbeddingTextHash { get; set; } = "";
+}
+
+// One Table explain-postgres runs the Tonight query for
+class ExplainTable
+{
+    public string Label { get; set; } = "";
+    public int PlayerCount { get; set; }
+    public int MinutesAvailable { get; set; }
+    public bool OwnedOnly { get; set; }
+}
+
+// What measure-pgvector records for one way of running the searches
+class PgvectorRun
+{
+    public double AverageMs { get; set; }
+    public double Recall { get; set; }        // 0 to 1, against the sequential scan's results
+    public string PlanSummary { get; set; } = "";
 }
 
 // One row of "SELECT c.id FROM c"
