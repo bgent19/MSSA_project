@@ -92,6 +92,11 @@ if (args.FirstOrDefault() == "ping-redis")
     return await PingRedis();
 }
 
+if (args.FirstOrDefault() == "invalidate-cache")
+{
+    return await InvalidateCache();
+}
+
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
 string? token = Environment.GetEnvironmentVariable("BGG_TOKEN");
 string outputDir = "raw";
@@ -1557,6 +1562,22 @@ static async Task<int> WatchCosmos(string instanceName)
     // Until A-19, "recording the intent" means a log line and a line in a local file
     IEmbedRequestQueue queue = new LocalEmbedRequestQueue("data/embed-requests.jsonl");
 
+    // A-16: any change to a Game also drops the web app's cached Recommendations. Optional: without
+    // the Redis secret the watcher still queues embeds and the cache entries end with their TTL.
+    // One multiplexer for the whole run, shared by every batch.
+    ConnectionMultiplexer? redis = null;
+    string? redisConnectionString = config["Redis:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(redisConnectionString))
+    {
+        Console.WriteLine("No Redis:ConnectionString secret, so the Recommendation cache will not be invalidated.");
+    }
+    else
+    {
+        ConfigurationOptions redisOptions = ConfigurationOptions.Parse(redisConnectionString);
+        redisOptions.AbortOnConnectFail = false;
+        redis = await ConnectionMultiplexer.ConnectAsync(redisOptions);
+    }
+
     // Called with each batch of changed documents. Throwing from here means the batch is retried,
     // so the handler only does cheap work that cannot really fail.
     async Task HandleChangesAsync(ChangeFeedProcessorContext context, IReadOnlyCollection<CosmosGameDocument> changes, CancellationToken cancellationToken)
@@ -1597,6 +1618,15 @@ static async Task<int> WatchCosmos(string instanceName)
 
             await queue.SendAsync(request);
         }
+
+        // Any write to a Game can change what the Tonight cache holds: an edited Blurb (its
+        // quote in a Reason now and, once re-embedded, its vector), a vector written back, or a
+        // changed fact. A new vector can move a Game into any answer, so every entry goes:
+        // one bump of the generation per batch.
+        if (redis != null)
+        {
+            await BumpCacheGeneration(redis);
+        }
     }
 
     // No WithStartTime: a processor with no leases yet starts from now. Calling
@@ -1632,6 +1662,10 @@ static async Task<int> WatchCosmos(string instanceName)
 
     // Stopping cleanly releases the leases, so another instance (or the next run) can pick them up
     await processor.StopAsync();
+    if (redis != null)
+    {
+        await redis.DisposeAsync();
+    }
     Console.WriteLine("Stopped.");
     return 0;
 }
@@ -2649,6 +2683,56 @@ static async Task<int> PingRedis()
 
     Console.WriteLine("RediSearch is available.");
     return 0;
+}
+
+// Drops every cached Recommendation in the web app's Tonight cache (A-16), for a change the cache
+// cannot see for itself: a Blurb edited in Postgres (which has no change feed), or a re-run of
+// upload-cosmos or upload-postgres. watch-cosmos does the same on its own for Cosmos changes.
+static async Task<int> InvalidateCache()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Redis:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Redis:ConnectionString");
+        Console.WriteLine("(pwsh infra/redis/provision-redis.ps1 sets it).");
+        return 1;
+    }
+
+    await using ConnectionMultiplexer redis = await ConnectionMultiplexer.ConnectAsync(connectionString);
+    long generation = await BumpCacheGeneration(redis);
+    if (generation < 0)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+// Raises the generation number that the web app's CachedGameSearchIndex puts in every cache key.
+// From then on no old key is looked up again, and the old entries expire with their TTL. One INCR,
+// whatever the number of entries: no KEYS, no SCAN. Returns the new generation, or -1 if Redis
+// could not be reached (the change still reaches the cache, at the latest when the TTL runs out).
+static async Task<long> BumpCacheGeneration(IConnectionMultiplexer redis)
+{
+    // The same name as CachedGameSearchIndex.GenerationKey; the Seeder does not reference the web
+    // project, so keep the two in step.
+    string generationKey = "tonight:generation";
+
+    try
+    {
+        long generation = await redis.GetDatabase().StringIncrementAsync(generationKey);
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Recommendation cache invalidated: generation is now {generation}");
+        return generation;
+    }
+    catch (Exception ex) when (ex is RedisException || ex is TimeoutException)
+    {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Could not invalidate the Recommendation cache: {ex.Message}");
+        return -1;
+    }
 }
 
 // One Ask in the load test, the same steps as PostgresGameSearchIndex.SearchAsync without the

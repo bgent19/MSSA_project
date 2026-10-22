@@ -3,6 +3,7 @@ using MeepleLedger.Storage;
 using Microsoft.Azure.Cosmos;
 using Npgsql;
 using Pgvector.Npgsql;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,9 +20,14 @@ builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
 // Switch with: dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos (or Postgres)
 string searchProvider = builder.Configuration["SearchIndex:Provider"] ?? "InMemory";
 
+// The class of the live Provider. It is registered as itself, and IGameSearchIndex is registered
+// at the end, either as this Provider or as the Recommendation cache wrapped around it (A-16).
+Type providerType;
+
 if (searchProvider == "InMemory")
 {
-    builder.Services.AddSingleton<IGameSearchIndex, InMemoryGameSearchIndex>();
+    builder.Services.AddSingleton<InMemoryGameSearchIndex>();
+    providerType = typeof(InMemoryGameSearchIndex);
 }
 else if (searchProvider == "Cosmos")
 {
@@ -48,7 +54,8 @@ else if (searchProvider == "Cosmos")
         RequiredSetting(config, "AzureOpenAI:Key"),
         RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
 
-    builder.Services.AddSingleton<IGameSearchIndex, CosmosGameSearchIndex>();
+    builder.Services.AddSingleton<CosmosGameSearchIndex>();
+    providerType = typeof(CosmosGameSearchIndex);
 }
 else if (searchProvider == "Postgres")
 {
@@ -77,11 +84,57 @@ else if (searchProvider == "Postgres")
         RequiredSetting(config, "AzureOpenAI:Key"),
         RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
 
-    builder.Services.AddSingleton<IGameSearchIndex, PostgresGameSearchIndex>();
+    builder.Services.AddSingleton<PostgresGameSearchIndex>();
+    providerType = typeof(PostgresGameSearchIndex);
 }
 else
 {
     throw new InvalidOperationException("Unknown SearchIndex:Provider '" + searchProvider + "'. Use InMemory, Cosmos or Postgres.");
+}
+
+// The Recommendation cache in Azure Managed Redis (A-16). Off by default, so the app still runs
+// with nothing but the code (ADR-0001). Needs Redis:ConnectionString when on.
+// Switch on with: dotnet run --project MeepleLedger -- --RecommendationCache:Enabled=true
+string? cacheSetting = builder.Configuration["RecommendationCache:Enabled"];
+bool cacheEnabled = cacheSetting != null && bool.Parse(cacheSetting);
+
+if (cacheEnabled)
+{
+    IConfiguration config = builder.Configuration;
+
+    // ConnectionMultiplexer is thread-safe, holds the connections and is slow to build, so there is
+    // exactly one for the whole app. One per request is the classic Redis mistake in .NET.
+    builder.Services.AddSingleton<IConnectionMultiplexer>(services =>
+    {
+        ConfigurationOptions options = ConfigurationOptions.Parse(RequiredSetting(config, "Redis:ConnectionString"));
+
+        // Fail open: the app starts even when Redis is down, and keeps trying to connect in the
+        // background. With FailFast a command fails at once while there is no connection, instead
+        // of waiting in a queue, so an Ask goes to the Provider without a delay. The short timeouts
+        // stop a slow Redis from making the cache slower than no cache.
+        options.AbortOnConnectFail = false;
+        options.BacklogPolicy = BacklogPolicy.FailFast;
+        options.ConnectTimeout = 3000;
+        options.SyncTimeout = 1000;
+        options.AsyncTimeout = 1000;
+
+        return ConnectionMultiplexer.Connect(options);
+    });
+
+    TimeSpan timeToLive = TimeSpan.FromMinutes(RequiredIntSetting(config, "RecommendationCache:TtlMinutes"));
+
+    builder.Services.AddSingleton<IGameSearchIndex>(services => new CachedGameSearchIndex(
+        (IGameSearchIndex)services.GetRequiredService(providerType),
+        searchProvider,
+        services.GetRequiredService<IConnectionMultiplexer>(),
+        services.GetRequiredService<IGameCatalogSource>(),
+        services.GetRequiredService<IMeepleStore>(),
+        timeToLive,
+        services.GetRequiredService<ILogger<CachedGameSearchIndex>>()));
+}
+else
+{
+    builder.Services.AddSingleton<IGameSearchIndex>(services => (IGameSearchIndex)services.GetRequiredService(providerType));
 }
 
 var app = builder.Build();

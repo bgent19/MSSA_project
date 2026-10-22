@@ -5,6 +5,11 @@
         private readonly Dictionary<string, OwnedGame> _games = []; // Key is game title
         public int TotalGames => _games.Count;
 
+        // Raised after a Game is added to or removed from the Collection, with the Game's name.
+        // Anything that keeps answers worked out from the Collection (such as cached
+        // Recommendations) listens here so it can throw them away.
+        public event Action<string>? Changed;
+
         public IEnumerable<OwnedGame> Games => [.. _games.Values.OrderBy(og => og.Game.Name)];
 
         public void Add(OwnedGame game)
@@ -15,6 +20,7 @@
             }
 
             _games.Add(game.Game.Name, game);
+            Changed?.Invoke(game.Game.Name);
         }
 
         public void Remove(string name)
@@ -23,6 +29,8 @@
             {
                 throw new InvalidOperationException("Title not found in collection.");
             }
+
+            Changed?.Invoke(name);
         }
 
         public bool Owns(string title) => _games.ContainsKey(title);

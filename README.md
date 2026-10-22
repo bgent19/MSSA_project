@@ -493,3 +493,28 @@ checks `PING` returns `PONG`, and runs `MODULE LIST` to confirm the search modul
 - **It bills every hour it exists.** There is no serverless option and no stop. If you are pausing
   for more than a day, delete it and run the script again later:
   `az redisenterprise delete --cluster-name meepleledger-redis --resource-group rg-meepleledger --yes`.
+
+### Recommendation cache (A-16)
+
+```
+dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos --RecommendationCache:Enabled=true
+dotnet run --project MeepleLedger.Seeder -- invalidate-cache
+```
+
+`CachedGameSearchIndex` is a decorator over `IGameSearchIndex`: `Program.cs` wraps whichever Provider
+is live in it when `RecommendationCache:Enabled` is `true` (default `false`, so a fresh clone needs no
+Redis). It shares one singleton `ConnectionMultiplexer` and needs the `Redis:ConnectionString` secret.
+Each Ask logs `Recommendation cache HIT` or `MISS` with the time it took.
+
+| Concern | Choice | Why |
+|---|---|---|
+| Key | `tonight:entry:<provider>:g<generation>:<sha256 of Ask>:players=..:minutes=..:owned=..:max=..` | Every Table field. Leaving out `owned` would answer a shelf-only Ask with Games you don't own. The Provider is in it so a Cosmos answer is never served to the Postgres app |
+| TTL | 60 min (`RecommendationCache:TtlMinutes`) | Invalidation handles the known changes, so the TTL is a backstop for unseen ones (a hand edit in Postgres). A game night is planned within an evening. The instance is `NoEviction`, so the TTL is what stops it filling up |
+| Collection changes | Tag sets `tonight:tag:owned-only` and `tonight:tag:game:<name>` | `GameCollection.Changed` fires on add/remove; every owned-only entry and every entry listing that Game is deleted. No `KEYS` |
+| Blurb edits | `INCR tonight:generation` | A new vector can move a Game into any answer, so every entry is affected. `watch-cosmos` bumps it on any Game change; `invalidate-cache` does it by hand (Postgres has no change feed) |
+| Redis down | Fail open | `AbortOnConnectFail=false`, `BacklogPolicy.FailFast`, 1 s timeouts: errors are logged and the Ask goes to the Provider |
+
+- **A hit costs two round trips** (the generation, then the entry): about 90 ms from here to
+  centralus. That beats a vector Provider (an embeddings call plus a query) and loses to the
+  InMemory Provider (about 4 ms). Don't turn the cache on in front of InMemory.
+- **Clustered:** nothing uses `MULTI` or a cross-slot multi-key command other than `DEL`.

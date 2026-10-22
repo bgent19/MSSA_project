@@ -29,4 +29,9 @@
     <PackageReference Include="Pgvector" Version="0.3.2" />
   </ItemGroup>
 
+  <!-- A-16: the Recommendation cache in Azure Managed Redis. Same version as MeepleLedger.Seeder. -->
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="3.4.5" />
+  </ItemGroup>
+
 </Project>
