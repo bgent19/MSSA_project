@@ -15,11 +15,12 @@ You need the .NET 10 SDK to build and run this.
 | [MeepleLedger/](MeepleLedger/) | The web app. `Domain/` has the classes, `Storage/` connects them to the app, `Data/` has the game data, `Components/` has the pages. |
 | [MeepleLedger.Tests/](MeepleLedger.Tests/) | xUnit tests for the domain rules. |
 | [MeepleLedger.Seeder/](MeepleLedger.Seeder/) | A separate console app that creates the files in `MeepleLedger/Data/`. |
+| [MeepleLedger.Worker/](MeepleLedger.Worker/) | A console app that takes embed requests off Service Bus and writes new vectors to Cosmos DB (A-19). |
 | [presentation/](presentation/) | HTML slides for the project presentation. |
 | [infra/](infra/) | Scripts and policy files that create the Azure resources for the AI features. |
 | `raw/`, `data/` | Working files for the seeder. Git ignores both, so they are empty after a fresh clone. |
 
-`MSSA_project.slnx` ties the three projects together.
+`MSSA_project.slnx` ties the four projects together.
 
 ## Running the app
 
@@ -287,9 +288,10 @@ dotnet run --project MeepleLedger.Seeder -- watch-cosmos [instance name]
 
 This runs a change feed processor on the `games` container until you press Enter. When a Game is
 added, or its Blurb, categories or mechanics are edited, it records that the Game needs a new
-vector. It does **not** call the embeddings API: it writes a log line and adds an embed request to
-`data/embed-requests.jsonl` (ignored by git). A later ticket (A-19) sends these requests over
-Service Bus instead, to a worker that does the embedding.
+vector. It does **not** call the embeddings API: it publishes an embed request to the Service Bus
+queue `embed-requests`, where `MeepleLedger.Worker` does the embedding (see
+[the embed worker](#the-embed-worker-a-19)). Without the `ServiceBus:ConnectionString` secret it
+writes a log line and adds the request to `data/embed-requests.jsonl` (ignored by git) instead.
 
 - **How it tells an edit from a vector write.** `upload-cosmos` stores `embeddingTextHash` on every
   document: the hash of the text its vector was made from. The handler hashes the document's current
@@ -635,3 +637,50 @@ Both subscriptions use the same delivery count, lock, TTL and dead-letter settin
 - **It bills every hour it exists** (Standard has a small base charge) and has no stop. A-33 deletes
   `rg-meepleledger`, which takes it with it; to remove only the namespace:
   `az servicebus namespace delete --name meepleledger-bus --resource-group rg-meepleledger`.
+
+### The embed worker (A-19)
+
+```
+dotnet run --project MeepleLedger.Worker                                  # run until Enter
+dotnet run --project MeepleLedger.Worker -- send <game id>                # queue one embed request by hand
+dotnet run --project MeepleLedger.Worker -- send-bad [missing|json|version]   # queue a poison message
+dotnet run --project MeepleLedger.Worker -- dlq [list|resubmit|purge]     # the dead-letter queue
+```
+
+The worker runs a Service Bus processor on `embed-requests`. For each request it reads the Game from
+Cosmos as it is now, embeds its text with the `game-embeddings` deployment, and patches `/embedding`
+and `/embeddingTextHash` back onto the document. It reads the `ServiceBus:*`, `AzureOpenAI:*` and
+`Cosmos:*` user secrets (the same secrets ID as the Seeder), never a settings file.
+
+Each message ends one of three ways, and the handler settles it itself (`AutoCompleteMessages` is off):
+
+| Outcome | When | What Service Bus does |
+|---|---|---|
+| Complete | The vector was written, or was already up to date | Removes the message |
+| Abandon | Anything that might work next time: a failed embeddings call, a Cosmos error, a Game not found, the Game edited between read and write (412) | Puts it back and adds one to its delivery count. After the 5th delivery it moves it to the dead-letter queue (`MaxDeliveryCountExceeded`) |
+| Dead-letter | The message itself is wrong: not JSON (`BadPayload`) or an unknown schema version (`UnsupportedSchemaVersion`) | Moves it to the dead-letter queue now, with that reason |
+
+- **Throwing does not dead-letter.** An exception in the handler only abandons the message, so a bad
+  message would come back 4 more times. Messages that can never work are dead-lettered explicitly.
+- **Duplicates are normal.** Service Bus delivers at least once. If the stored hash already matches
+  the Game's text the worker completes the message without calling the embeddings API, so a second
+  copy costs one Cosmos read.
+- **The patch is conditional.** It only applies if the document's ETag is still the one the worker
+  read. A whole-document upsert would put the old Blurb back over an edit made in between.
+- **Locks are renewed** by the processor for up to 5 minutes, so a slow call does not hand the message
+  to a second worker. Up to 4 messages are handled at once.
+- **Schema version** 1 is in the body (`schemaVersion`) and in an application property of the same name.
+- **The dead-letter queue never expires** and counts against the queue's size. The worker prints how
+  many messages are in it when it starts. `dlq` lists each one with its reason, description and the
+  last error. `dlq resubmit` puts them back on the queue, except ones the worker could not read.
+  `dlq purge` deletes them.
+
+To see the poison path, run the worker and `send-bad` in another terminal. A request for a Game that
+does not exist fails 5 times about 5 seconds apart, then shows up in `dlq` as `MaxDeliveryCountExceeded`.
+`send-bad json` is dead-lettered on the first delivery.
+
+End to end: run `watch-cosmos` and the worker side by side, then edit a Blurb in Data Explorer. The
+watcher publishes a request, the worker re-embeds the Game and prints how similar the new vector is to
+the old one, and the watcher then sees the vector write and prints `text unchanged, vector is up to
+date`. That last line means the worker and the Seeder hash the text the same way; if they did not, the
+two would loop forever.

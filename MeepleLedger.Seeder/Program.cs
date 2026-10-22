@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Xml.Linq;
+using Azure.Messaging.ServiceBus;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
@@ -961,13 +962,17 @@ static async Task<int> Embed()
 
 // The text that gets embedded for one Game: name, categories and mechanics as well as the Blurb,
 // so a search for "deck building" can match on the mechanic even if the Blurb never says it.
+// MeepleLedger.Worker has a copy that must build exactly the same text, or the hashes differ and
+// every vector it writes back looks like an edit to watch-cosmos (A-19). Keep the two in step.
+// Lines end in "\r\n" whatever the OS: the hashes were first made on Windows, and AppendLine would
+// use "\n" on Linux (where A-21's Function runs).
 static string BuildEmbeddingText(string name, List<string> categories, List<string> mechanics, string blurb)
 {
     var text = new StringBuilder();
-    text.AppendLine($"Name: {name}");
-    text.AppendLine($"Categories: {string.Join(", ", categories)}");
-    text.AppendLine($"Mechanics: {string.Join(", ", mechanics)}");
-    text.AppendLine();
+    text.Append($"Name: {name}\r\n");
+    text.Append($"Categories: {string.Join(", ", categories)}\r\n");
+    text.Append($"Mechanics: {string.Join(", ", mechanics)}\r\n");
+    text.Append("\r\n");
     text.Append(blurb);
     return text.ToString();
 }
@@ -1506,7 +1511,8 @@ static void PrintCharge(string label, QueryCharge charge)
 // Hosts a change feed processor on the games container (A-10). It runs until Enter is pressed.
 // When a Game is added or its Blurb edited, the handler records the intent to re-embed it on an
 // IEmbedRequestQueue. It never calls the embeddings API itself: detecting a change and doing the
-// slow, metered work are kept apart, so A-19 can swap the local queue for Service Bus.
+// slow, metered work are kept apart. Since A-19 the queue is the Service Bus queue embed-requests
+// (MeepleLedger.Worker does the embedding); without the ServiceBus secret it is still the local file.
 //
 // Things worth knowing about the change feed:
 //   - Deletes never reach the handler. The feed only carries creates and updates; a delete would
@@ -1569,8 +1575,25 @@ static async Task<int> WatchCosmos(string instanceName)
         return 1;
     }
 
-    // Until A-19, "recording the intent" means a log line and a line in a local file
-    IEmbedRequestQueue queue = new LocalEmbedRequestQueue("data/embed-requests.jsonl");
+    // A-19: "recording the intent" means publishing an embed request to Service Bus, for
+    // MeepleLedger.Worker. Without the secret it falls back to a log line and a local file, so the
+    // watcher still runs with no bus.
+    IEmbedRequestQueue queue;
+    string queueDescription;
+    ServiceBusClient? busClient = null;
+    string? busConnectionString = config["ServiceBus:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(busConnectionString))
+    {
+        Console.WriteLine("No ServiceBus:ConnectionString secret, so embed requests go to a local file.");
+        queue = new LocalEmbedRequestQueue("data/embed-requests.jsonl");
+        queueDescription = "data/embed-requests.jsonl";
+    }
+    else
+    {
+        busClient = new ServiceBusClient(busConnectionString);
+        queue = new ServiceBusEmbedRequestQueue(busClient.CreateSender(ServiceBusEmbedRequestQueue.QueueName));
+        queueDescription = $"the Service Bus queue '{ServiceBusEmbedRequestQueue.QueueName}'";
+    }
 
     // A-16: any change to a Game also drops the web app's cached Recommendations. Optional: without
     // the Redis secret the watcher still queues embeds and the cache entries end with their TTL.
@@ -1589,7 +1612,8 @@ static async Task<int> WatchCosmos(string instanceName)
     }
 
     // Called with each batch of changed documents. Throwing from here means the batch is retried,
-    // so the handler only does cheap work that cannot really fail.
+    // so the handler only does cheap work. A send to Service Bus that fails throws, and the retry
+    // sends the whole batch again: duplicates the worker is built to shrug off.
     async Task HandleChangesAsync(ChangeFeedProcessorContext context, IReadOnlyCollection<CosmosGameDocument> changes, CancellationToken cancellationToken)
     {
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {changes.Count} change(s) on lease {context.LeaseToken}, {context.Headers.RequestCharge:0.00} RU to read");
@@ -1666,7 +1690,7 @@ static async Task<int> WatchCosmos(string instanceName)
     await processor.StartAsync();
 
     Console.WriteLine($"Watching {databaseName}/{containerName} as processor '{processorName}', instance '{instanceName}'.");
-    Console.WriteLine($"Leases are kept in {databaseName}/{leaseContainerName}. New Games and edited Blurbs are queued to data/embed-requests.jsonl.");
+    Console.WriteLine($"Leases are kept in {databaseName}/{leaseContainerName}. New Games and edited Blurbs are queued to {queueDescription}.");
     Console.WriteLine("Press Enter to stop.");
     Console.ReadLine();
 
@@ -1675,6 +1699,11 @@ static async Task<int> WatchCosmos(string instanceName)
     if (redis != null)
     {
         await redis.DisposeAsync();
+    }
+    if (busClient != null)
+    {
+        // Also closes the sender it made
+        await busClient.DisposeAsync();
     }
     Console.WriteLine("Stopped.");
     return 0;
@@ -3577,7 +3606,8 @@ class QueryCharge
 }
 
 // The intent to re-embed one Game, as the change feed handler records it (A-10). A-19 sends the
-// same shape over Service Bus, so it carries a schema version from the start.
+// same shape over Service Bus, so it carries a schema version from the start. MeepleLedger.Worker
+// has a copy of this class that reads it; keep the two in step.
 class EmbedRequest
 {
     public int SchemaVersion { get; set; }
@@ -3588,14 +3618,47 @@ class EmbedRequest
 }
 
 // Where the change feed handler records an EmbedRequest. This is the seam: the handler only knows
-// it can send a request, so A-19 can put a Service Bus queue behind it without touching the handler.
+// it can send a request, so A-19 put a Service Bus queue behind it without touching the handler.
 interface IEmbedRequestQueue
 {
     Task SendAsync(EmbedRequest request);
 }
 
-// The stand-in until A-19: writes a log line and appends the request to a local JSON Lines file
-// (one request per line), so the queued requests are still there after the host stops.
+// A-19: publishes each request to the Service Bus queue, where MeepleLedger.Worker picks it up.
+// The message is built the same way as the worker's own "send" command builds it.
+class ServiceBusEmbedRequestQueue : IEmbedRequestQueue
+{
+    // The queue provision-servicebus.ps1 creates. MeepleLedger.Worker reads the same name.
+    public const string QueueName = "embed-requests";
+
+    // camelCase on the wire, the same as the worker (which would read any case)
+    private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+    private readonly ServiceBusSender sender;
+
+    public ServiceBusEmbedRequestQueue(ServiceBusSender sender)
+    {
+        this.sender = sender;
+    }
+
+    public async Task SendAsync(EmbedRequest request)
+    {
+        ServiceBusMessage message = new ServiceBusMessage(JsonSerializer.Serialize(request, JsonOptions));
+        message.ContentType = "application/json";
+        message.Subject = "EmbedRequest";
+
+        // The schema version is in the body, and again as a property so it can be read (or
+        // filtered on) without parsing the body
+        message.ApplicationProperties["schemaVersion"] = request.SchemaVersion;
+
+        await sender.SendMessageAsync(message);
+        Console.WriteLine($"  '{request.GameId}': {request.Reason}, embed request published (hash {request.TextHash.Substring(0, 8)})");
+    }
+}
+
+// The stand-in before A-19, still used when there is no Service Bus secret: writes a log line and
+// appends the request to a local JSON Lines file (one request per line), so the queued requests
+// are still there after the host stops.
 class LocalEmbedRequestQueue : IEmbedRequestQueue
 {
     private readonly string filePath;
