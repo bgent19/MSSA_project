@@ -10,6 +10,7 @@ using System.Xml.Linq;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
+using Npgsql;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -56,6 +57,11 @@ if (args.FirstOrDefault() == "watch-cosmos")
         instanceName = args[1];
     }
     return await WatchCosmos(instanceName);
+}
+
+if (args.FirstOrDefault() == "setup-postgres")
+{
+    return await SetupPostgres();
 }
 
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
@@ -1599,6 +1605,66 @@ static async Task<int> WatchCosmos(string instanceName)
     // Stopping cleanly releases the leases, so another instance (or the next run) can pick them up
     await processor.StopAsync();
     Console.WriteLine("Stopped.");
+    return 0;
+}
+
+// Creates the pgvector extension on the Flexible Server and checks it is there (A-11).
+// The provision script only allow-lists VECTOR in azure.extensions; the extension itself is
+// created per database, from a client, which is this. Also prints the memory settings A-12's
+// HNSW build depends on. Safe to run again.
+static async Task<int> SetupPostgres()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Postgres:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Postgres:ConnectionString");
+        Console.WriteLine("(pwsh infra/postgres/provision-postgres.ps1 sets it).");
+        return 1;
+    }
+
+    await using NpgsqlDataSource dataSource = NpgsqlDataSource.Create(connectionString);
+    await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+
+    try
+    {
+        await using NpgsqlCommand create = new("CREATE EXTENSION IF NOT EXISTS vector", connection);
+        await create.ExecuteNonQueryAsync();
+    }
+    catch (PostgresException ex)
+    {
+        // The usual cause is the other half of the setup: VECTOR missing from azure.extensions.
+        Console.WriteLine($"CREATE EXTENSION failed: {ex.MessageText}");
+        Console.WriteLine("Check that VECTOR is in the azure.extensions server parameter");
+        Console.WriteLine("(pwsh infra/postgres/provision-postgres.ps1 adds it).");
+        return 1;
+    }
+
+    await using NpgsqlCommand versionQuery = new("SELECT extversion FROM pg_extension WHERE extname = 'vector'", connection);
+    object? version = await versionQuery.ExecuteScalarAsync();
+    if (version == null)
+    {
+        Console.WriteLine("The vector extension is not installed, even after CREATE EXTENSION.");
+        return 1;
+    }
+
+    Console.WriteLine($"server:                {connection.Host} / {connection.Database}");
+    Console.WriteLine($"postgres version:      {connection.PostgreSqlVersion}");
+    Console.WriteLine($"vector extversion:     {version}");
+
+    // The settings that decide whether an HNSW build fits in memory or spills to disk
+    string[] settingNames = ["shared_buffers", "work_mem", "maintenance_work_mem", "max_parallel_maintenance_workers"];
+    foreach (string settingName in settingNames)
+    {
+        await using NpgsqlCommand show = new("SELECT current_setting(@name)", connection);
+        show.Parameters.AddWithValue("name", settingName);
+        object? value = await show.ExecuteScalarAsync();
+        Console.WriteLine($"{settingName + ":",-22} {value}");
+    }
+
     return 0;
 }
 

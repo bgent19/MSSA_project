@@ -309,3 +309,29 @@ Service Bus instead, to a worker that does the embedding.
 
 To try it, start the processor, then in **Data Explorer → games → Items** open a Game, change a word
 in its `blurb` and save. Within a few seconds the processor prints the change and queues a request.
+
+### Azure Database for PostgreSQL (pgvector)
+
+```
+pwsh infra/postgres/provision-postgres.ps1
+dotnet run --project MeepleLedger.Seeder -- setup-postgres
+```
+
+The script creates a PostgreSQL 17 Flexible Server called `meepleledger-pg` in `rg-meepleledger`,
+with a `meepleledger` database and a firewall rule for your current public IP. It then adds `VECTOR`
+to the `azure.extensions` server parameter and saves `Postgres:ConnectionString` into the Seeder's
+user secrets. Run the script again from a new network to update the firewall rule.
+
+- **Sized on purpose.** Burstable `Standard_B1ms` (1 vCore, 2 GiB) with the minimum 32 GiB of
+  storage and auto-grow off. 200 vectors of 1536 dimensions plus an HNSW index come to a few MB, so
+  the smallest SKU is plenty. Storage can grow later but never shrink.
+- **centralus, not eastus2.** The subscription this was built on cannot create Flexible Servers in
+  eastus2, so the server lives in centralus while its resource group stays in eastus2.
+- **Allow-listing is not installing.** The script only allow-lists the extension. `setup-postgres`
+  connects with [Npgsql](https://www.npgsql.org/), runs `CREATE EXTENSION IF NOT EXISTS vector` in
+  the `meepleledger` database, and prints `extversion` and the memory settings an HNSW build depends
+  on (`maintenance_work_mem` and others).
+- **It bills while it runs.** Unlike serverless Cosmos DB, a running server costs money every hour
+  whether or not you use it. Stop it when you are done:
+  `az postgres flexible-server stop --name meepleledger-pg --resource-group rg-meepleledger`.
+  Azure starts a stopped server again by itself after seven days.
