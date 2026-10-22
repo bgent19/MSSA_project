@@ -16,9 +16,45 @@ builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
 
 // Which Search Index Provider is live. InMemory is the default and needs nothing (ADR-0001);
 // Cosmos needs the Cosmos:* and AzureOpenAI:* settings, Postgres needs Postgres:ConnectionString
-// and AzureOpenAI:* (user secrets in Development).
-// Switch with: dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos (or Postgres)
+// and AzureOpenAI:*, Redis needs Redis:ConnectionString and AzureOpenAI:* (user secrets in Development).
+// Switch with: dotnet run --project MeepleLedger -- --SearchIndex:Provider=Cosmos (or Postgres, Redis)
 string searchProvider = builder.Configuration["SearchIndex:Provider"] ?? "InMemory";
+
+// The Recommendation cache in Azure Managed Redis (A-16). Off by default, so the app still runs
+// with nothing but the code (ADR-0001). Needs Redis:ConnectionString when on.
+// Switch on with: dotnet run --project MeepleLedger -- --RecommendationCache:Enabled=true
+string? cacheSetting = builder.Configuration["RecommendationCache:Enabled"];
+bool cacheEnabled = cacheSetting != null && bool.Parse(cacheSetting);
+
+// The Redis Provider (A-17) and the cache share one connection to the same instance.
+if (searchProvider == "Redis" || cacheEnabled)
+{
+    IConfiguration config = builder.Configuration;
+
+    // ConnectionMultiplexer is thread-safe, holds the connections and is slow to build, so there is
+    // exactly one for the whole app. One per request is the classic Redis mistake in .NET.
+    builder.Services.AddSingleton<IConnectionMultiplexer>(services =>
+    {
+        ConfigurationOptions options = ConfigurationOptions.Parse(RequiredSetting(config, "Redis:ConnectionString"));
+
+        // Fail open: the app starts even when Redis is down, and keeps trying to connect in the
+        // background. With FailFast a command fails at once while there is no connection, instead
+        // of waiting in a queue, so an Ask goes to the Provider without a delay. The short timeouts
+        // stop a slow Redis from making the cache slower than no cache. The Redis Provider has
+        // nothing to fall back to, so for it an outage shows as an error on the Tonight screen.
+        options.AbortOnConnectFail = false;
+        options.BacklogPolicy = BacklogPolicy.FailFast;
+        options.ConnectTimeout = 3000;
+        options.SyncTimeout = 1000;
+        options.AsyncTimeout = 1000;
+
+        // StackExchange.Redis 3 talks RESP3 when the server offers it, and then FT.SEARCH answers
+        // with a map instead of the flat array RedisGameSearchIndex reads. RESP2 keeps that shape.
+        options.Protocol = RedisProtocol.Resp2;
+
+        return ConnectionMultiplexer.Connect(options);
+    });
+}
 
 // The class of the live Provider. It is registered as itself, and IGameSearchIndex is registered
 // at the end, either as this Provider or as the Recommendation cache wrapped around it (A-16).
@@ -87,39 +123,27 @@ else if (searchProvider == "Postgres")
     builder.Services.AddSingleton<PostgresGameSearchIndex>();
     providerType = typeof(PostgresGameSearchIndex);
 }
+else if (searchProvider == "Redis")
+{
+    IConfiguration config = builder.Configuration;
+
+    // The IConnectionMultiplexer is registered above, shared with the Recommendation cache.
+    builder.Services.AddSingleton(services => new AskEmbedder(
+        RequiredSetting(config, "AzureOpenAI:Endpoint"),
+        RequiredSetting(config, "AzureOpenAI:Key"),
+        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
+
+    builder.Services.AddSingleton<RedisGameSearchIndex>();
+    providerType = typeof(RedisGameSearchIndex);
+}
 else
 {
-    throw new InvalidOperationException("Unknown SearchIndex:Provider '" + searchProvider + "'. Use InMemory, Cosmos or Postgres.");
+    throw new InvalidOperationException("Unknown SearchIndex:Provider '" + searchProvider + "'. Use InMemory, Cosmos, Postgres or Redis.");
 }
-
-// The Recommendation cache in Azure Managed Redis (A-16). Off by default, so the app still runs
-// with nothing but the code (ADR-0001). Needs Redis:ConnectionString when on.
-// Switch on with: dotnet run --project MeepleLedger -- --RecommendationCache:Enabled=true
-string? cacheSetting = builder.Configuration["RecommendationCache:Enabled"];
-bool cacheEnabled = cacheSetting != null && bool.Parse(cacheSetting);
 
 if (cacheEnabled)
 {
     IConfiguration config = builder.Configuration;
-
-    // ConnectionMultiplexer is thread-safe, holds the connections and is slow to build, so there is
-    // exactly one for the whole app. One per request is the classic Redis mistake in .NET.
-    builder.Services.AddSingleton<IConnectionMultiplexer>(services =>
-    {
-        ConfigurationOptions options = ConfigurationOptions.Parse(RequiredSetting(config, "Redis:ConnectionString"));
-
-        // Fail open: the app starts even when Redis is down, and keeps trying to connect in the
-        // background. With FailFast a command fails at once while there is no connection, instead
-        // of waiting in a queue, so an Ask goes to the Provider without a delay. The short timeouts
-        // stop a slow Redis from making the cache slower than no cache.
-        options.AbortOnConnectFail = false;
-        options.BacklogPolicy = BacklogPolicy.FailFast;
-        options.ConnectTimeout = 3000;
-        options.SyncTimeout = 1000;
-        options.AsyncTimeout = 1000;
-
-        return ConnectionMultiplexer.Connect(options);
-    });
 
     TimeSpan timeToLive = TimeSpan.FromMinutes(RequiredIntSetting(config, "RecommendationCache:TtlMinutes"));
 

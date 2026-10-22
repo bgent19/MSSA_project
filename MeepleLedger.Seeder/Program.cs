@@ -97,6 +97,16 @@ if (args.FirstOrDefault() == "invalidate-cache")
     return await InvalidateCache();
 }
 
+if (args.FirstOrDefault() == "upload-redis")
+{
+    return await UploadRedis();
+}
+
+if (args.FirstOrDefault() == "compare-providers")
+{
+    return await CompareProviders();
+}
+
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
 string? token = Environment.GetEnvironmentVariable("BGG_TOKEN");
 string outputDir = "raw";
@@ -1759,87 +1769,12 @@ static NpgsqlDataSource? CreatePostgresDataSource()
 static async Task<int> UploadPostgres()
 {
     string schemaFile = "infra/postgres/games-schema.sql";
-    string blurbFile = "data/blurbs.json";
-    string vectorFile = "data/vectors.json";
 
-    if (!File.Exists(vectorFile))
+    List<PostgresGameRow>? rows = LoadGameRows();
+    if (rows == null)
     {
-        Console.WriteLine($"{vectorFile} not found. Run the embed step first.");
         return 1;
     }
-
-    var vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
-
-    var blurbs = new Dictionary<string, string>();
-    if (File.Exists(blurbFile))
-    {
-        blurbs = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(blurbFile))!;
-    }
-
-    // The same game facts emit writes into CatalogSeed.cs, read from the same raw XML
-    List<PostgresGameRow> rows = [];
-    int noVector = 0;
-
-    foreach (var batchFile in Directory.GetFiles("raw", "thing-batch-*.xml"))
-    {
-        foreach (var item in XDocument.Load(batchFile).Root!.Elements("item"))
-        {
-            string name = item.Elements("name")
-                              .First(n => (string?)n.Attribute("type") == "primary")
-                              .Attribute("value")!.Value;
-
-            int maxPlayers = int.Parse(item.Element("maxplayers")!.Attribute("value")!.Value);
-
-            // emit drops these too, so they are not in the Catalog
-            if (maxPlayers < 1)
-            {
-                continue;
-            }
-
-            if (!vectors.ContainsKey(name))
-            {
-                Console.WriteLine($"no vector for '{name}', skipped. Run the embed step.");
-                noVector++;
-                continue;
-            }
-
-            // Same rule as emit: absent or 0 means unrated, not light
-            float? weight = null;
-            string? weightText = item.Element("statistics")?.Element("ratings")?
-                                     .Element("averageweight")?.Attribute("value")?.Value;
-            if (float.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) && w > 0)
-            {
-                weight = w;
-            }
-
-            string? blurb = null;
-            if (blurbs.ContainsKey(name))
-            {
-                blurb = blurbs[name];
-            }
-
-            string designer = item.Elements("link")
-                                  .FirstOrDefault(l => (string?)l.Attribute("type") == "boardgamedesigner")?
-                                  .Attribute("value")?.Value ?? "Unknown";
-
-            rows.Add(new PostgresGameRow
-            {
-                Name = name,
-                Designer = designer,
-                MinPlayers = int.Parse(item.Element("minplayers")!.Attribute("value")!.Value),
-                MaxPlayers = maxPlayers,
-                PlaytimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value),
-                Categories = LinkValues(item, "boardgamecategory"),
-                Mechanics = LinkValues(item, "boardgamemechanic"),
-                Weight = weight,
-                Blurb = blurb,
-                Embedding = vectors[name].Vector,
-                EmbeddingTextHash = vectors[name].Hash,
-            });
-        }
-    }
-
-    Console.WriteLine($"{rows.Count} games to upsert ({noVector} skipped for want of a vector)");
 
     NpgsqlDataSource? dataSource = CreatePostgresDataSource();
     if (dataSource == null)
@@ -1953,6 +1888,96 @@ static async Task<int> UploadPostgres()
     }
 
     return 0;
+}
+
+// Loads one row per Game from the raw XML, data/blurbs.json and data/vectors.json: the same Games
+// and facts emit writes into CatalogSeed.cs, with the Blurb and vector added. upload-postgres and
+// upload-redis both load these, so the two stores hold the same data. Returns null when there are
+// no vectors yet.
+static List<PostgresGameRow>? LoadGameRows()
+{
+    string blurbFile = "data/blurbs.json";
+    string vectorFile = "data/vectors.json";
+
+    if (!File.Exists(vectorFile))
+    {
+        Console.WriteLine($"{vectorFile} not found. Run the embed step first.");
+        return null;
+    }
+
+    var vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
+
+    var blurbs = new Dictionary<string, string>();
+    if (File.Exists(blurbFile))
+    {
+        blurbs = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(blurbFile))!;
+    }
+
+    // The same game facts emit writes into CatalogSeed.cs, read from the same raw XML
+    List<PostgresGameRow> rows = [];
+    int noVector = 0;
+
+    foreach (var batchFile in Directory.GetFiles("raw", "thing-batch-*.xml"))
+    {
+        foreach (var item in XDocument.Load(batchFile).Root!.Elements("item"))
+        {
+            string name = item.Elements("name")
+                              .First(n => (string?)n.Attribute("type") == "primary")
+                              .Attribute("value")!.Value;
+
+            int maxPlayers = int.Parse(item.Element("maxplayers")!.Attribute("value")!.Value);
+
+            // emit drops these too, so they are not in the Catalog
+            if (maxPlayers < 1)
+            {
+                continue;
+            }
+
+            if (!vectors.ContainsKey(name))
+            {
+                Console.WriteLine($"no vector for '{name}', skipped. Run the embed step.");
+                noVector++;
+                continue;
+            }
+
+            // Same rule as emit: absent or 0 means unrated, not light
+            float? weight = null;
+            string? weightText = item.Element("statistics")?.Element("ratings")?
+                                     .Element("averageweight")?.Attribute("value")?.Value;
+            if (float.TryParse(weightText, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) && w > 0)
+            {
+                weight = w;
+            }
+
+            string? blurb = null;
+            if (blurbs.ContainsKey(name))
+            {
+                blurb = blurbs[name];
+            }
+
+            string designer = item.Elements("link")
+                                  .FirstOrDefault(l => (string?)l.Attribute("type") == "boardgamedesigner")?
+                                  .Attribute("value")?.Value ?? "Unknown";
+
+            rows.Add(new PostgresGameRow
+            {
+                Name = name,
+                Designer = designer,
+                MinPlayers = int.Parse(item.Element("minplayers")!.Attribute("value")!.Value),
+                MaxPlayers = maxPlayers,
+                PlaytimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value),
+                Categories = LinkValues(item, "boardgamecategory"),
+                Mechanics = LinkValues(item, "boardgamemechanic"),
+                Weight = weight,
+                Blurb = blurb,
+                Embedding = vectors[name].Vector,
+                EmbeddingTextHash = vectors[name].Hash,
+            });
+        }
+    }
+
+    Console.WriteLine($"{rows.Count} games to upsert ({noVector} skipped for want of a vector)");
+    return rows;
 }
 
 // Compares the two pgvector index types against an exact search for A-12, and prints a table to
@@ -2685,6 +2710,554 @@ static async Task<int> PingRedis()
     return 0;
 }
 
+// Opens the Redis connection from the Redis:ConnectionString user secret.
+// Returns null (after saying why) when the secret is missing.
+static async Task<ConnectionMultiplexer?> ConnectRedis()
+{
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Redis:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Redis:ConnectionString");
+        Console.WriteLine("(pwsh infra/redis/provision-redis.ps1 sets it).");
+        return null;
+    }
+
+    // StackExchange.Redis 3 talks RESP3 when the server offers it, and then FT.SEARCH and FT.INFO
+    // answer with maps instead of the flat arrays read below. RESP2 keeps the documented shape.
+    ConfigurationOptions options = ConfigurationOptions.Parse(connectionString);
+    options.Protocol = RedisProtocol.Resp2;
+
+    return await ConnectionMultiplexer.ConnectAsync(options);
+}
+
+// Loads every Game into Azure Managed Redis as a hash and builds the RediSearch vector index over
+// them (A-17). The same Games, facts and vectors as upload-postgres. Safe to run again:
+//   - each hash is written over, and any "game:*" key that is not one of these Games is deleted
+//   - FT.CREATE fails on an index that already exists, so the index is dropped first (without DD,
+//     which would delete the hashes too) and created again. That also means a change to the schema
+//     below takes effect on the next run. While it rebuilds, a running app's Asks fail for a moment.
+// Ends with a self-check: a Game's own vector must find that Game first.
+// Metered (the instance bills while it exists, not per command).
+static async Task<int> UploadRedis()
+{
+    // The same names as RedisGameSearchIndex in the web project; keep them in step.
+    string indexName = "idx:games";
+    string keyPrefix = "game:";
+    int dimensions = 1536;
+
+    List<PostgresGameRow>? rows = LoadGameRows();
+    if (rows == null)
+    {
+        return 1;
+    }
+
+    // A vector of the wrong length is stored without complaint and then left out of the index
+    foreach (PostgresGameRow row in rows)
+    {
+        if (row.Embedding.Length != dimensions)
+        {
+            Console.WriteLine($"'{row.Name}' has a {row.Embedding.Length}-dimension vector, not {dimensions}. Run the embed step again.");
+            return 1;
+        }
+    }
+
+    ConnectionMultiplexer? redis = await ConnectRedis();
+    if (redis == null)
+    {
+        return 1;
+    }
+
+    await using (redis)
+    {
+        IDatabase database = redis.GetDatabase();
+
+        // 1. One hash per Game. Every command touches one key, so none can hit CROSSSLOT on the
+        //    clustered instance. They are sent together and awaited together (pipelined).
+        HashSet<string> expectedKeys = [];
+        List<Task> writes = [];
+
+        foreach (PostgresGameRow row in rows)
+        {
+            string key = keyPrefix + row.Name;
+            expectedKeys.Add(key);
+
+            List<HashEntry> fields =
+            [
+                new HashEntry("name", row.Name),
+                new HashEntry("min_players", row.MinPlayers),
+                new HashEntry("max_players", row.MaxPlayers),
+                new HashEntry("playtime_minutes", row.PlaytimeMinutes),
+                new HashEntry("embedding", VectorToBytes(row.Embedding)),
+                new HashEntry("embedding_text_hash", row.EmbeddingTextHash),
+            ];
+
+            if (row.Blurb != null)
+            {
+                fields.Add(new HashEntry("blurb", row.Blurb));
+            }
+
+            writes.Add(database.HashSetAsync(key, fields.ToArray()));
+
+            // HSET only sets the fields it is given, so a Blurb that has gone away must be removed
+            if (row.Blurb == null)
+            {
+                writes.Add(database.HashDeleteAsync(key, "blurb"));
+            }
+        }
+
+        await Task.WhenAll(writes);
+        Console.WriteLine($"wrote {rows.Count} hashes under {keyPrefix}*");
+
+        // 2. Delete anything under the prefix that is not one of these Games. KeysAsync uses SCAN,
+        //    a page at a time, never KEYS (which blocks the server while it walks every key).
+        IServer server = redis.GetServer(redis.GetEndPoints()[0]);
+        List<RedisKey> strays = [];
+        await foreach (RedisKey key in server.KeysAsync(pattern: keyPrefix + "*", pageSize: 500))
+        {
+            if (!expectedKeys.Contains(key.ToString()))
+            {
+                strays.Add(key);
+            }
+        }
+
+        foreach (RedisKey stray in strays)
+        {
+            await database.KeyDeleteAsync(stray);
+        }
+
+        if (strays.Count > 0)
+        {
+            Console.WriteLine($"deleted {strays.Count} stray key(s)");
+        }
+
+        // 3. The index. FT._LIST names every index; drop ours if it is there, then create it.
+        RedisResult[] indexes = (RedisResult[])(await database.ExecuteAsync("FT._LIST"))!;
+        bool indexExists = false;
+        foreach (RedisResult index in indexes)
+        {
+            if (index.ToString() == indexName)
+            {
+                indexExists = true;
+            }
+        }
+
+        if (indexExists)
+        {
+            // No DD: drop the index only, keep the hashes
+            await database.ExecuteAsync("FT.DROPINDEX", indexName);
+            Console.WriteLine($"dropped the existing index {indexName}");
+        }
+
+        // FT.CREATE idx:games ON HASH PREFIX 1 game: SCHEMA
+        //   name TAG SEPARATOR | CASESENSITIVE      exact names for the owned-only filter. The default
+        //                                            separator is a comma, which would cut
+        //                                            "Air, Land, & Sea" into three tags
+        //   min_players NUMERIC                      the Table filters
+        //   max_players NUMERIC
+        //   playtime_minutes NUMERIC
+        //   embedding VECTOR FLAT 6 TYPE FLOAT32 DIM 1536 DISTANCE_METRIC COSINE
+        //                                            FLAT is an exact scan: at 200 vectors it costs
+        //                                            microseconds and never misses a Game to a filter.
+        //                                            COSINE matches the other two stores. The 6 is the
+        //                                            number of words that follow it.
+        // blurb and embedding_text_hash are stored in the hash but not indexed.
+        await database.ExecuteAsync("FT.CREATE",
+            indexName, "ON", "HASH", "PREFIX", "1", keyPrefix, "SCHEMA",
+            "name", "TAG", "SEPARATOR", "|", "CASESENSITIVE",
+            "min_players", "NUMERIC",
+            "max_players", "NUMERIC",
+            "playtime_minutes", "NUMERIC",
+            "embedding", "VECTOR", "FLAT", "6",
+                "TYPE", "FLOAT32",
+                "DIM", dimensions.ToString(CultureInfo.InvariantCulture),
+                "DISTANCE_METRIC", "COSINE");
+        Console.WriteLine($"created index {indexName}");
+
+        // 4. FT.CREATE indexes the existing hashes in the background. Wait until it has them all.
+        string expectedCount = rows.Count.ToString(CultureInfo.InvariantCulture);
+        string numDocs = "";
+        string failures = "";
+        for (int attempt = 0; attempt < 60; attempt++)
+        {
+            RedisResult[] info = (RedisResult[])(await database.ExecuteAsync("FT.INFO", indexName))!;
+            numDocs = ReadInfoField(info, "num_docs");
+            failures = ReadInfoField(info, "hash_indexing_failures");
+
+            if (numDocs == expectedCount)
+            {
+                break;
+            }
+
+            await Task.Delay(500);
+        }
+
+        Console.WriteLine($"indexed {numDocs} of {rows.Count} hashes, {failures} indexing failure(s)");
+        if (numDocs != expectedCount)
+        {
+            Console.WriteLine("The index does not hold every Game. A failure usually means an embedding field");
+            Console.WriteLine("that is not 1536 float32 values written as raw bytes.");
+            return 1;
+        }
+
+        // 5. Self-check: a Game's own vector must come back first.
+        //    A vector stored as text instead of bytes would make this return nothing.
+        PostgresGameRow sample = rows[0];
+        RedisResult reply = await database.ExecuteAsync("FT.SEARCH",
+            indexName, "*=>[KNN 1 @embedding $askVector AS distance]",
+            "PARAMS", "2", "askVector", VectorToBytes(sample.Embedding),
+            "SORTBY", "distance", "ASC",
+            "RETURN", "2", "name", "distance",
+            "DIALECT", "2");
+
+        List<string> found = ReadRedisSearchNames(reply);
+        if (found.Count == 0 || found[0] != sample.Name)
+        {
+            Console.WriteLine($"Self-check failed: searching with the vector of '{sample.Name}' did not find it first.");
+            return 1;
+        }
+
+        Console.WriteLine($"self-check: the vector of '{sample.Name}' finds '{found[0]}' first");
+
+        // Cached Recommendations were made from the old data; drop them
+        await BumpCacheGeneration(redis);
+
+        Console.WriteLine();
+        Console.WriteLine($"loaded {rows.Count} games into Redis, searchable through {indexName}");
+    }
+
+    return 0;
+}
+
+// RediSearch takes a vector as raw bytes: float32 values, little-endian, one after another.
+// A vector sent as a JSON array is stored without complaint and never matches anything.
+static byte[] VectorToBytes(float[] vector)
+{
+    byte[] bytes = new byte[vector.Length * 4];
+    for (int i = 0; i < vector.Length; i++)
+    {
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(i * 4, 4), vector[i]);
+    }
+
+    return bytes;
+}
+
+// FT.INFO answers with one flat array of names and values: [name, value, name, value, ...].
+// Returns the value for the given name as text, or "" when the server did not send it.
+static string ReadInfoField(RedisResult[] info, string fieldName)
+{
+    for (int i = 0; i + 1 < info.Length; i += 2)
+    {
+        if (info[i].ToString() == fieldName)
+        {
+            return info[i + 1].ToString() ?? "";
+        }
+    }
+
+    return "";
+}
+
+// The "name" field of each hit in an FT.SEARCH reply, in order. The reply is
+// [total, key, [field, value, ...], key, [field, value, ...], ...]
+static List<string> ReadRedisSearchNames(RedisResult reply)
+{
+    RedisResult[] items = (RedisResult[])reply!;
+    List<string> names = [];
+
+    for (int i = 1; i + 1 < items.Length; i += 2)
+    {
+        RedisResult[] fields = (RedisResult[])items[i + 1]!;
+        for (int f = 0; f + 1 < fields.Length; f += 2)
+        {
+            if (fields[f].ToString() == "name")
+            {
+                names.Add(fields[f + 1].ToString() ?? "");
+            }
+        }
+    }
+
+    return names;
+}
+
+// Runs the same Ask and Table against all three cloud Search Indexes and prints the latency and
+// what each query costs, for the A-17 comparison. The Ask is embedded once and the same vector is
+// sent to each store, so the times are for the store alone; the embeddings call is timed on its own
+// (every Provider pays it). Without an embeddings resource a Game's own vector stands in for the Ask. Each store gets one warm-up run (opening connections) and then 20 timed
+// runs one after another, seen from this machine, so the network is in every number. A store whose
+// secrets are missing, or that cannot be reached, is skipped. Metered: up to 1 embeddings call,
+// 21 Cosmos queries, and the Postgres server and Redis instance must be running.
+static async Task<int> CompareProviders()
+{
+    // The A-08/A-09 Ask and Table, across the whole Catalog
+    string askText = "quick co-op for three";
+    int playerCount = 3;
+    int minutesAvailable = 60;
+    int maxResults = 10;
+    int runs = 20;
+
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    float[]? askVector = null;
+    string askDescription = "Ask \"" + askText + "\"";
+
+    // Embed the Ask once; every store gets the same vector
+    EmbeddingSettings? embeddingSettings = LoadEmbeddingSettings();
+    if (embeddingSettings != null)
+    {
+        try
+        {
+            HttpClient http = new();
+            http.DefaultRequestHeaders.Add("api-key", embeddingSettings.Key);
+            var embedStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            string? embeddingResponse = await PostWithRetry(http, embeddingSettings.Url, [askText]);
+            embedStopwatch.Stop();
+
+            if (embeddingResponse != null)
+            {
+                using JsonDocument json = JsonDocument.Parse(embeddingResponse);
+                JsonElement embedding = json.RootElement.GetProperty("data")[0].GetProperty("embedding");
+                askVector = new float[embedding.GetArrayLength()];
+                int i = 0;
+                foreach (JsonElement number in embedding.EnumerateArray())
+                {
+                    askVector[i] = number.GetSingle();
+                    i++;
+                }
+
+                Console.WriteLine($"embeddings call (paid by every Provider): {embedStopwatch.Elapsed.TotalMilliseconds:0} ms");
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.WriteLine($"embeddings call failed: {ex.Message}");
+        }
+    }
+
+    // No embeddings resource (for example after a teardown): use a Game's own vector as the Ask,
+    // as load-postgres does. The stores do the same work either way; only the answers differ.
+    if (askVector == null)
+    {
+        string vectorFile = "data/vectors.json";
+        if (!File.Exists(vectorFile))
+        {
+            Console.WriteLine($"{vectorFile} not found either. Run the embed step first.");
+            return 1;
+        }
+
+        var vectors = JsonSerializer.Deserialize<Dictionary<string, GameVector>>(File.ReadAllText(vectorFile))!;
+        string standIn = "Pandemic";
+        if (!vectors.ContainsKey(standIn))
+        {
+            standIn = vectors.Keys.First();
+        }
+
+        askVector = vectors[standIn].Vector;
+        askDescription = "the vector of '" + standIn + "' standing in for an Ask";
+    }
+
+    Console.WriteLine($"{askDescription}, {playerCount} players, {minutesAvailable} minutes, top {maxResults}, whole Catalog");
+    Console.WriteLine();
+
+    List<ProviderTiming> timings = [];
+
+    // Cosmos DB: the query in CosmosGameSearchIndex.BuildQuery
+    string? cosmosEndpoint = config["Cosmos:Endpoint"];
+    string? cosmosKey = config["Cosmos:Key"];
+    string? cosmosDatabase = config["Cosmos:Database"];
+    string? cosmosContainer = config["Cosmos:Container"];
+    if (string.IsNullOrWhiteSpace(cosmosEndpoint) || string.IsNullOrWhiteSpace(cosmosKey)
+        || string.IsNullOrWhiteSpace(cosmosDatabase) || string.IsNullOrWhiteSpace(cosmosContainer))
+    {
+        Console.WriteLine("Cosmos: skipped, the Cosmos:* user secrets are missing");
+    }
+    else
+    {
+        try
+        {
+            CosmosClientOptions options = new CosmosClientOptions
+            {
+                SerializerOptions = new CosmosSerializationOptions
+                {
+                    PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+                },
+            };
+
+            using CosmosClient client = new CosmosClient(cosmosEndpoint, cosmosKey, options);
+            Container container = client.GetContainer(cosmosDatabase, cosmosContainer);
+
+            string sql = "SELECT TOP @maxResults c.id, VectorDistance(c.embedding, @askVector) AS score FROM c "
+                + "WHERE (c.minPlayers <= 0 OR c.minPlayers <= @playerCount) "
+                + "AND (c.maxPlayers <= 0 OR c.maxPlayers >= @playerCount) "
+                + "AND (c.playtimeMinutes <= 0 OR c.playtimeMinutes <= @minutesAvailable) "
+                + "ORDER BY VectorDistance(c.embedding, @askVector)";
+            QueryDefinition query = BuildMeasureQuery(sql, askVector, playerCount, minutesAvailable, maxResults);
+
+            ProviderTiming timing = new ProviderTiming { Name = "Cosmos DB (serverless)" };
+            double charge = 0;
+
+            for (int run = 0; run <= runs; run++)
+            {
+                List<string> names = [];
+                charge = 0;
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                using FeedIterator<JObject> iterator = container.GetItemQueryIterator<JObject>(query);
+                while (iterator.HasMoreResults)
+                {
+                    FeedResponse<JObject> page = await iterator.ReadNextAsync();
+                    charge += page.RequestCharge;
+                    foreach (JObject row in page)
+                    {
+                        names.Add(row["id"]!.ToString());
+                    }
+                }
+
+                stopwatch.Stop();
+
+                // Run 0 is the warm-up
+                if (run > 0)
+                {
+                    timing.Milliseconds.Add(stopwatch.Elapsed.TotalMilliseconds);
+                }
+                timing.TopNames = names;
+            }
+
+            timing.CostPerAsk = $"{charge:0.00} RU";
+            timings.Add(timing);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Cosmos: skipped, {ex.Message}");
+        }
+    }
+
+    // PostgreSQL: the query in PostgresGameSearchIndex.BuildSql (via TonightSql)
+    NpgsqlDataSource? dataSource = CreatePostgresDataSource();
+    if (dataSource != null)
+    {
+        try
+        {
+            await using (dataSource)
+            {
+                await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+                ExplainTable table = new ExplainTable { Label = "compare", PlayerCount = playerCount, MinutesAvailable = minutesAvailable, OwnedOnly = false };
+
+                ProviderTiming timing = new ProviderTiming { Name = "PostgreSQL (B1ms, pgvector)" };
+
+                for (int run = 0; run <= runs; run++)
+                {
+                    List<string> names = [];
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                    await using (NpgsqlCommand command = new(TonightSql(false, false), connection))
+                    {
+                        AddTonightParameters(command, new Vector(askVector), table, [], maxResults);
+                        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync();
+                        while (await reader.ReadAsync())
+                        {
+                            names.Add(reader.GetString(0));
+                        }
+                    }
+
+                    stopwatch.Stop();
+                    if (run > 0)
+                    {
+                        timing.Milliseconds.Add(stopwatch.Elapsed.TotalMilliseconds);
+                    }
+                    timing.TopNames = names;
+                }
+
+                timing.CostPerAsk = "flat hourly";
+                timings.Add(timing);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PostgreSQL: skipped, {ex.Message}");
+        }
+    }
+
+    // Redis: the query in RedisGameSearchIndex.BuildQuery
+    ConnectionMultiplexer? redis = null;
+    try
+    {
+        redis = await ConnectRedis();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Redis: skipped, {ex.Message}");
+    }
+
+    if (redis != null)
+    {
+        try
+        {
+            await using (redis)
+            {
+                IDatabase database = redis.GetDatabase();
+                byte[] askBytes = VectorToBytes(askVector);
+                string query = "(@min_players:[-inf $players] (@max_players:[-inf 0] | @max_players:[$players +inf]) "
+                    + "@playtime_minutes:[-inf $minutes])=>[KNN " + maxResults + " @embedding $askVector AS distance]";
+
+                ProviderTiming timing = new ProviderTiming { Name = "Redis (Managed, Balanced B0)" };
+
+                for (int run = 0; run <= runs; run++)
+                {
+                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    RedisResult reply = await database.ExecuteAsync("FT.SEARCH",
+                        "idx:games", query,
+                        "PARAMS", "6",
+                        "players", playerCount.ToString(CultureInfo.InvariantCulture),
+                        "minutes", minutesAvailable.ToString(CultureInfo.InvariantCulture),
+                        "askVector", askBytes,
+                        "SORTBY", "distance", "ASC",
+                        "LIMIT", "0", maxResults.ToString(CultureInfo.InvariantCulture),
+                        "RETURN", "3", "name", "blurb", "distance",
+                        "DIALECT", "2");
+                    stopwatch.Stop();
+
+                    if (run > 0)
+                    {
+                        timing.Milliseconds.Add(stopwatch.Elapsed.TotalMilliseconds);
+                    }
+                    timing.TopNames = ReadRedisSearchNames(reply);
+                }
+
+                timing.CostPerAsk = "flat hourly";
+                timings.Add(timing);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Redis: skipped, {ex.Message}");
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("| Provider | p50 | p95 | Fastest | Cost per Ask | Results | Top 3 |");
+    Console.WriteLine("|---|---|---|---|---|---|---|");
+    foreach (ProviderTiming timing in timings)
+    {
+        List<string> topThree = [];
+        for (int i = 0; i < timing.TopNames.Count && i < 3; i++)
+        {
+            topThree.Add(timing.TopNames[i]);
+        }
+
+        Console.WriteLine($"| {timing.Name} | {FormatMs(Percentile(timing.Milliseconds, 50))} | {FormatMs(Percentile(timing.Milliseconds, 95))} "
+            + $"| {FormatMs(Percentile(timing.Milliseconds, 0))} | {timing.CostPerAsk} | {timing.TopNames.Count} | {string.Join(", ", topThree)} |");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"{runs} timed runs each after one warm-up; times are from this machine and include the network.");
+    return 0;
+}
+
 // Drops every cached Recommendation in the web app's Tonight cache (A-16), for a change the cache
 // cannot see for itself: a Blurb edited in Postgres (which has no change feed), or a re-run of
 // upload-cosmos or upload-postgres. watch-cosmos does the same on its own for Cosmos changes.
@@ -2935,7 +3508,8 @@ class CosmosGameDocument
     public string? EmbeddingTextHash { get; set; }
 }
 
-// One Game as stored in the PostgreSQL games table (infra/postgres/games-schema.sql)
+// One Game as stored in the PostgreSQL games table (infra/postgres/games-schema.sql).
+// upload-redis writes the same rows as Redis hashes.
 class PostgresGameRow
 {
     public string Name { get; set; } = "";
@@ -2949,6 +3523,15 @@ class PostgresGameRow
     public string? Blurb { get; set; }
     public float[] Embedding { get; set; } = [];
     public string EmbeddingTextHash { get; set; } = "";
+}
+
+// One store's runs in compare-providers: each run's time, what one Ask costs, and the last answer
+class ProviderTiming
+{
+    public string Name { get; set; } = "";
+    public List<double> Milliseconds { get; set; } = [];
+    public string CostPerAsk { get; set; } = "";
+    public List<string> TopNames { get; set; } = [];
 }
 
 // One Table explain-postgres runs the Tonight query for

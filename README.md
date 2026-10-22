@@ -518,3 +518,79 @@ Each Ask logs `Recommendation cache HIT` or `MISS` with the time it took.
   centralus. That beats a vector Provider (an embeddings call plus a query) and loses to the
   InMemory Provider (about 4 ms). Don't turn the cache on in front of InMemory.
 - **Clustered:** nothing uses `MULTI` or a cross-slot multi-key command other than `DEL`.
+
+### Redis as a Search Index (A-17)
+
+```
+dotnet run --project MeepleLedger.Seeder -- upload-redis
+dotnet run --project MeepleLedger -- --SearchIndex:Provider=Redis
+```
+
+`upload-redis` writes each Game as a hash at `game:<name>` (the same rows as `upload-postgres`) and
+builds the RediSearch index `idx:games` over them. `RedisGameSearchIndex` embeds the Ask and runs one
+`FT.SEARCH`. It needs the `Redis:ConnectionString` and `AzureOpenAI:*` secrets, and shares the
+cache's singleton `ConnectionMultiplexer`.
+
+```
+FT.CREATE idx:games ON HASH PREFIX 1 game: SCHEMA
+  name TAG SEPARATOR | CASESENSITIVE
+  min_players NUMERIC  max_players NUMERIC  playtime_minutes NUMERIC
+  embedding VECTOR FLAT 6 TYPE FLOAT32 DIM 1536 DISTANCE_METRIC COSINE
+
+FT.SEARCH idx:games
+  "(@min_players:[-inf $players] (@max_players:[-inf 0] | @max_players:[$players +inf])
+    @playtime_minutes:[-inf $minutes] @name:{Azul|Sea\ Salt\ \&\ Paper})=>[KNN 10 @embedding $askVector AS distance]"
+  PARAMS 6 players 3 minutes 60 askVector <6144 bytes>
+  SORTBY distance ASC  LIMIT 0 10  RETURN 3 name blurb distance  DIALECT 2
+```
+
+- **The vector is raw bytes:** 1536 little-endian float32 values, written and queried as a binary
+  blob. `upload-redis` ends with a self-check: a Game's own vector must find that Game first.
+- **The Table is the filter in front of `=>`**, so KNN only ranks Games the Table admits. The
+  `@name:{...}` tag list is only there when "Only games on my shelf" is ticked. `k` is written into the
+  query string; the numbers and the vector go in `PARAMS`. `DIALECT 2` is needed for both.
+- **FLAT, not HNSW.** At 200 vectors an exact scan costs microseconds, and it cannot lose Games to a
+  filter the way HNSW did in Postgres (A-13), so there is no fallback query.
+- **Tag escaping:** ASCII punctuation and spaces in a name get a backslash. Non-ASCII characters
+  must not (`Dune: Imperium – Uprising` with a backslash before the en dash matches nothing). The
+  separator is `|` because the default, a comma, would split `Air, Land, & Sea`.
+- **`FT.CREATE` is not idempotent**, so `upload-redis` drops the index (without `DD`, which would
+  delete the hashes too) and creates it again on every run. It also deletes stray `game:*` keys
+  (found with `SCAN`) and bumps `tonight:generation` so cached Recommendations are dropped.
+- **RESP2 is pinned.** StackExchange.Redis 3 negotiates RESP3, and then `FT.SEARCH` answers with a
+  map instead of the flat array the code reads. Both connections set `Protocol = RedisProtocol.Resp2`.
+- **Clustered:** with the `EnterpriseCluster` policy the search module runs distributed. Each shard
+  indexes its own hashes and `FT.SEARCH` is fanned out and merged, so no hash tags are needed.
+
+#### Comparing the three Providers (A-17)
+
+```
+dotnet run --project MeepleLedger.Seeder -- compare-providers
+```
+
+This sends the same Ask vector and Table (3 players, 60 minutes, top 10, whole Catalog) to all three
+stores: one warm-up, then 20 timed runs each, from a home connection to centralus/eastus2. The
+Azure OpenAI account had been deleted when this was measured, so a Game's own vector (Pandemic)
+stood in for the Ask, as `load-postgres` does. The stores do the same work either way.
+
+| Provider | p50 | p95 | Cost per Ask | Billing |
+|---|---|---|---|---|
+| Cosmos DB (serverless) | 48 ms | 120 ms | 6.70 RU (about $1.70 per million Asks at $0.25 per million RU) | Per request, plus storage. Nothing when idle |
+| PostgreSQL (B1ms, pgvector) | 49–60 ms | 55–63 ms | nothing extra | Hourly while the server runs (about $12/month compute), can be stopped |
+| Redis (Managed, Balanced B0) | 36–44 ms | 37–46 ms | nothing extra | Hourly while it exists. No stop |
+
+Ranges are across two runs. All three returned the same top 10. Every Provider also pays the
+embeddings call on top (not measured here). Every number is mostly the ~40 ms round trip; the store's
+own work is a few milliseconds. At 200 Games, latency does not separate the three. Durability and billing do.
+Redis holds everything in memory with high availability off, so a restart loses the index and it
+must be reloaded from the other stores. Cosmos and Postgres pay for durable storage.
+
+**When to choose each:**
+- **Cosmos DB:** when the vectors live alongside operational documents that are already in Cosmos,
+  traffic is spiky or low (serverless bills nothing when idle), and you want a change feed to keep
+  the embeddings current.
+- **PostgreSQL:** when the data is relational and the vector search needs joins and SQL filters
+  against it, and you want one durable, transactional store whose plans you can inspect and tune.
+- **Redis:** when the lowest, steadiest latency at high query rates matters more than durability, and
+  the vectors are a copy of data held durably elsewhere. You pay for the whole dataset in memory, by
+  the hour, whether or not anyone asks.
