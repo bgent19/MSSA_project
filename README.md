@@ -410,3 +410,53 @@ or the Blurb's opening sentence when none do.
 ```
 dotnet run --project MeepleLedger.Seeder -- explain-postgres
 ```
+
+#### Connection pooling (A-14)
+
+Each PostgreSQL connection is a separate server **process** with its own memory, not a thread, so
+connections are expensive to open (TCP, TLS, authentication, a fork on the server) and few in number.
+A B1ms server allows 50, and Azure keeps 15 of those for itself. So the app never opens one per Ask:
+
+- **One `NpgsqlDataSource` for the whole app**, registered as a singleton in `Program.cs`. It owns the
+  pool and is thread-safe. A data source built per request would start a new, empty pool every time:
+  modern-looking code with no pooling at all.
+- **The pool size is set, not defaulted.** `Postgres:MinPoolSize` (2) keeps a couple of connections
+  warm; `Postgres:MaxPoolSize` (20) caps the app well below the 35 user connections, leaving room for
+  the Seeder, `psql` and a second app instance. Asks beyond 20 at once wait for a free connection.
+- **Every command has a timeout.** `Postgres:CommandTimeoutSeconds` (5) is added to the connection
+  string; the Tonight query takes about a millisecond on the server, so 5 seconds means something is
+  wrong, and the Ask fails instead of holding a connection forever.
+- **The repeated commands are prepared** (`Postgres:PrepareStatements`, on by default): parsed and
+  planned once per pooled connection rather than once per Ask. The exact-scan fallback is not
+  prepared, because a prepared statement can keep a plan made before `enable_indexscan` was turned
+  off. Postgres does not plan it again when a planner setting changes.
+
+These settings live in `appsettings.json` and are added on top of the secret connection string.
+`load-postgres` measures them: 50 Asks at once, 5 rounds, three ways. It reads the same
+`appsettings.json`, and uses Games' own vectors as the Asks, so it makes no embeddings calls.
+
+```
+dotnet run --project MeepleLedger.Seeder -- load-postgres
+```
+
+Measured from a home connection to the `centralus` server (per-Ask times include waiting for a
+connection and the network; "later" is rounds 2 to 5):
+
+| Run | Round 1 p50 | Later p50 | Later p95 | Asks/s | Failed | Connections left open |
+|---|---|---|---|---|---|---|
+| No pooling | 2130 ms | 1952 ms | 2406 ms | 20 | 0 of 250 | 0 |
+| Pooled (min 2, max 20) | 1180 ms | 262 ms | 410 ms | 117 | 0 of 250 | 20 |
+| Pooled + prepared | 1188 ms | 260 ms | 408 ms | 116 | 0 of 250 | 20 |
+
+- **Pooling is the big win:** about 7x lower latency and 6x the throughput, because the connection
+  handshake is paid once instead of on every Ask. Round 1 is slow for both pooled runs because it
+  opens the connections.
+- **Prepared statements changed nothing measurable here.** At 200 rows, parsing and planning take
+  microseconds and the round trip to Azure dominates. They are kept on because they cost nothing,
+  and they would matter for a heavier query or a closer client.
+- **No PgBouncer.** Azure's built-in PgBouncer helps when many *clients* each hold a pool and
+  together pass `max_connections`. One app with a pool of 20 does not. It also isn't available
+  on the Burstable tier. Revisit this when the app runs as several replicas (A-26/A-27):
+  6 replicas x 20 would pass 35. If PgBouncer goes in front, in transaction mode an Ask can land on a
+  different server connection from the one its statement was prepared on, so set
+  `Postgres:PrepareStatements` to `false` first.

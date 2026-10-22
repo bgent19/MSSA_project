@@ -55,10 +55,19 @@ else if (searchProvider == "Postgres")
     IConfiguration config = builder.Configuration;
 
     // NpgsqlDataSource owns the connection pool, so there is exactly one for the whole app.
+    // A data source per request would build a new, empty pool each time and pooling would never happen.
     // UseVector maps pgvector's vector type, so the Ask's embedding is sent as a parameter.
     builder.Services.AddSingleton(services =>
     {
         NpgsqlDataSourceBuilder dataSourceBuilder = new NpgsqlDataSourceBuilder(RequiredSetting(config, "Postgres:ConnectionString"));
+
+        // Pool and timeout settings come from appsettings.json and are added to the secret
+        // connection string here (A-14). Each Postgres connection is a server process, and a B1ms
+        // server allows 50 connections, 15 of them kept by Azure, so the pool must stay well under 35.
+        dataSourceBuilder.ConnectionStringBuilder.MinPoolSize = RequiredIntSetting(config, "Postgres:MinPoolSize");
+        dataSourceBuilder.ConnectionStringBuilder.MaxPoolSize = RequiredIntSetting(config, "Postgres:MaxPoolSize");
+        dataSourceBuilder.ConnectionStringBuilder.CommandTimeout = RequiredIntSetting(config, "Postgres:CommandTimeoutSeconds");
+
         dataSourceBuilder.UseVector();
         return dataSourceBuilder.Build();
     });
@@ -111,4 +120,16 @@ static string RequiredSetting(IConfiguration config, string name)
     }
 
     return value;
+}
+
+// The same, for a whole-number setting such as a pool size.
+static int RequiredIntSetting(IConfiguration config, string name)
+{
+    string value = RequiredSetting(config, name);
+    if (!int.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out int number))
+    {
+        throw new InvalidOperationException("Setting " + name + " must be a whole number, not '" + value + "'.");
+    }
+
+    return number;
 }

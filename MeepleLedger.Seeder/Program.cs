@@ -81,6 +81,11 @@ if (args.FirstOrDefault() == "explain-postgres")
     return await ExplainPostgres();
 }
 
+if (args.FirstOrDefault() == "load-postgres")
+{
+    return await LoadPostgres();
+}
+
 string? username = Environment.GetEnvironmentVariable("BGG_USERNAME");
 string? token = Environment.GetEnvironmentVariable("BGG_TOKEN");
 string outputDir = "raw";
@@ -2365,6 +2370,275 @@ static void AddTonightParameters(NpgsqlCommand command, Vector askVector, Explai
     }
 }
 
+// A crude load test of the Tonight query (A-14): 50 Asks at once, in rounds, run three ways:
+//   no pooling          Pooling=false: every Ask opens (and closes) its own server connection
+//   pooled              the app's pool settings from MeepleLedger/appsettings.json
+//   pooled + prepared   the same pool, with the commands prepared as PostgresGameSearchIndex does
+// Each Ask does what the app's SearchAsync does on its normal path: open a connection, begin a
+// transaction, SET LOCAL hnsw.ef_search, run the query, commit. The time covers all of that, seen
+// from this machine, so it includes the network. Round 1 is reported on its own because it pays
+// for opening the pool's connections; the later rounds show the steady state.
+// The Ask vectors are 50 Games' own vectors, so no embeddings calls are made (in the app the
+// embeddings call is a separate HTTP request and is not part of the connection story). Metered.
+static async Task<int> LoadPostgres()
+{
+    int concurrentAsks = 50;
+    int rounds = 5;
+    int maxResults = 10;
+
+    // The pool settings are read from the web app's own appsettings.json, so the test uses
+    // exactly what the app uses. The connection string comes from user secrets as usual.
+    // AddJsonFile looks next to the exe unless given a full path, hence GetFullPath.
+    IConfiguration config = new ConfigurationBuilder()
+        .AddJsonFile(Path.GetFullPath("MeepleLedger/appsettings.json"))
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? connectionString = config["Postgres:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("Missing user secret Postgres:ConnectionString");
+        Console.WriteLine("(pwsh infra/postgres/provision-postgres.ps1 sets it).");
+        return 1;
+    }
+
+    int minPoolSize = int.Parse(config["Postgres:MinPoolSize"]!, CultureInfo.InvariantCulture);
+    int maxPoolSize = int.Parse(config["Postgres:MaxPoolSize"]!, CultureInfo.InvariantCulture);
+    int commandTimeoutSeconds = int.Parse(config["Postgres:CommandTimeoutSeconds"]!, CultureInfo.InvariantCulture);
+    string efSearch = config["Postgres:EfSearch"]!;
+
+    // A separate data source for looking at the server, so it is not counted in any pool under test
+    NpgsqlDataSourceBuilder monitorBuilder = new NpgsqlDataSourceBuilder(connectionString);
+    monitorBuilder.UseVector();
+    await using NpgsqlDataSource monitor = monitorBuilder.Build();
+
+    var askVectors = new List<Vector>();
+    await using (NpgsqlConnection connection = await monitor.OpenConnectionAsync())
+    {
+        await using (NpgsqlCommand select = new("SELECT embedding FROM games ORDER BY name LIMIT @count", connection))
+        {
+            select.Parameters.AddWithValue("count", concurrentAsks);
+            await using NpgsqlDataReader reader = await select.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                askVectors.Add(reader.GetFieldValue<Vector>(0));
+            }
+        }
+
+        if (askVectors.Count == 0)
+        {
+            Console.WriteLine("The games table is empty. Run upload-postgres first.");
+            return 1;
+        }
+
+        string maxConnections = await ScalarPostgres<string>(connection, "SHOW max_connections");
+        Console.WriteLine($"server max_connections: {maxConnections} (Azure keeps some of these for itself)");
+    }
+
+    // The same wide Table for every Ask; the Asks differ by vector
+    var table = new ExplainTable { Label = "4 players, 120 minutes", PlayerCount = 4, MinutesAvailable = 120, OwnedOnly = false };
+    string sql = TonightSql(table.OwnedOnly, countOnly: false);
+
+    Console.WriteLine($"{concurrentAsks} concurrent Asks x {rounds} rounds, Table: {table.Label}, top {maxResults}");
+    Console.WriteLine($"pool: min {minPoolSize}, max {maxPoolSize}; command timeout {commandTimeoutSeconds} s; ef_search {efSearch}");
+    Console.WriteLine();
+
+    var report = new List<string>();
+    report.Add("| Run | Round 1 p50 | Round 1 p95 | Round 1 max | Later p50 | Later p95 | Later max | Later Asks/s | Failed | Server connections after |");
+    report.Add("|---|---|---|---|---|---|---|---|---|---|");
+
+    string[] runNames = ["no pooling", "pooled", "pooled + prepared"];
+    foreach (string runName in runNames)
+    {
+        NpgsqlConnectionStringBuilder settings = new NpgsqlConnectionStringBuilder(connectionString);
+        settings.CommandTimeout = commandTimeoutSeconds;
+        if (runName == "no pooling")
+        {
+            settings.Pooling = false;
+        }
+        else
+        {
+            settings.MinPoolSize = minPoolSize;
+            settings.MaxPoolSize = maxPoolSize;
+        }
+
+        bool prepare = runName == "pooled + prepared";
+
+        NpgsqlDataSourceBuilder builder = new NpgsqlDataSourceBuilder(settings.ConnectionString);
+        builder.UseVector();
+        await using NpgsqlDataSource dataSource = builder.Build();
+
+        Console.WriteLine($"running: {runName}...");
+
+        var firstRound = new List<double>();
+        var laterRounds = new List<double>();
+        double laterWallMs = 0;
+        int failed = 0;
+        string firstError = "";
+
+        for (int round = 1; round <= rounds; round++)
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            // Start all the Asks, then wait for all of them
+            var asks = new List<Task<LoadAskResult>>();
+            for (int i = 0; i < concurrentAsks; i++)
+            {
+                Vector askVector = askVectors[i % askVectors.Count];
+                asks.Add(RunLoadAsk(dataSource, sql, askVector, table, maxResults, efSearch, prepare));
+            }
+            LoadAskResult[] results = await Task.WhenAll(asks);
+
+            stopwatch.Stop();
+
+            foreach (LoadAskResult result in results)
+            {
+                if (result.Error != null)
+                {
+                    failed++;
+                    if (firstError == "")
+                    {
+                        firstError = result.Error;
+                    }
+                    continue;
+                }
+
+                if (round == 1)
+                {
+                    firstRound.Add(result.Milliseconds);
+                }
+                else
+                {
+                    laterRounds.Add(result.Milliseconds);
+                }
+            }
+
+            if (round > 1)
+            {
+                laterWallMs += stopwatch.Elapsed.TotalMilliseconds;
+            }
+        }
+
+        // How many connections this run left open on the server: the pool's idle ones (the
+        // monitor's own connection is taken off the count)
+        long serverConnections;
+        await using (NpgsqlConnection connection = await monitor.OpenConnectionAsync())
+        {
+            serverConnections = await ScalarPostgres<long>(connection,
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND usename = current_user");
+            serverConnections = serverConnections - 1;
+        }
+
+        double asksPerSecond = 0;
+        if (laterWallMs > 0)
+        {
+            asksPerSecond = laterRounds.Count / (laterWallMs / 1000.0);
+        }
+
+        report.Add($"| {runName} | {FormatMs(Percentile(firstRound, 50))} | {FormatMs(Percentile(firstRound, 95))} | {FormatMs(Percentile(firstRound, 100))} " +
+                   $"| {FormatMs(Percentile(laterRounds, 50))} | {FormatMs(Percentile(laterRounds, 95))} | {FormatMs(Percentile(laterRounds, 100))} " +
+                   $"| {asksPerSecond:0} | {failed} of {concurrentAsks * rounds} | {serverConnections} |");
+
+        if (firstError != "")
+        {
+            Console.WriteLine($"  first failure: {firstError}");
+        }
+    }
+
+    Console.WriteLine();
+    foreach (string line in report)
+    {
+        Console.WriteLine(line);
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Times are per Ask from this machine: waiting for a connection + the queries + the network.");
+    Console.WriteLine($"Round 1 opens connections; 'Later' is rounds 2 to {rounds} together.");
+    return 0;
+}
+
+// One Ask in the load test, the same steps as PostgresGameSearchIndex.SearchAsync without the
+// exact-scan fallback. Never throws: a failure is returned so the other Asks carry on.
+static async Task<LoadAskResult> RunLoadAsk(NpgsqlDataSource dataSource, string sql, Vector askVector,
+    ExplainTable table, int maxResults, string efSearch, bool prepare)
+{
+    var result = new LoadAskResult();
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+    try
+    {
+        await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync();
+        await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync();
+
+        await using (NpgsqlCommand set = new("SELECT set_config(@name, @value, true)", connection, transaction))
+        {
+            set.Parameters.AddWithValue("name", "hnsw.ef_search");
+            set.Parameters.AddWithValue("value", efSearch);
+            if (prepare)
+            {
+                await set.PrepareAsync();
+            }
+            await set.ExecuteNonQueryAsync();
+        }
+
+        await using (NpgsqlCommand query = new(sql, connection, transaction))
+        {
+            AddTonightParameters(query, askVector, table, [], maxResults);
+            if (prepare)
+            {
+                await query.PrepareAsync();
+            }
+
+            await using NpgsqlDataReader reader = await query.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                // Read the row as the app does, so the data really comes back over the wire
+                reader.GetString(0);
+            }
+        }
+
+        await transaction.CommitAsync();
+    }
+    catch (Exception ex)
+    {
+        result.Error = ex.GetType().Name + ": " + ex.Message;
+    }
+
+    stopwatch.Stop();
+    result.Milliseconds = stopwatch.Elapsed.TotalMilliseconds;
+    return result;
+}
+
+// The value below which the given percent of the times fall (100 gives the largest).
+// Returns -1 when there are no times, which FormatMs shows as "-".
+static double Percentile(List<double> times, int percent)
+{
+    if (times.Count == 0)
+    {
+        return -1;
+    }
+
+    var sorted = new List<double>(times);
+    sorted.Sort();
+
+    int index = (int)Math.Ceiling(percent / 100.0 * sorted.Count) - 1;
+    if (index < 0)
+    {
+        index = 0;
+    }
+
+    return sorted[index];
+}
+
+static string FormatMs(double milliseconds)
+{
+    if (milliseconds < 0)
+    {
+        return "-";
+    }
+    return $"{milliseconds:0} ms";
+}
+
 static async Task ExecutePostgres(NpgsqlConnection connection, string sql)
 {
     await using NpgsqlCommand command = new(sql, connection);
@@ -2506,6 +2780,13 @@ class ExplainTable
     public int PlayerCount { get; set; }
     public int MinutesAvailable { get; set; }
     public bool OwnedOnly { get; set; }
+}
+
+// One Ask in load-postgres: how long it took, or why it failed
+class LoadAskResult
+{
+    public double Milliseconds { get; set; }
+    public string? Error { get; set; }
 }
 
 // What measure-pgvector records for one way of running the searches

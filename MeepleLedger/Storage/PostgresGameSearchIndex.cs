@@ -20,6 +20,12 @@ namespace MeepleLedger.Storage;
 //     The contract allows fewer results only when fewer Games fit, so the exact scan has the last word.
 //   - ORDER BY distance is the ordering. A second sort key could stop the planner using the vector
 //     index, so the Name tie-break is applied here, only between neighbours with equal distances.
+//
+// Connections (A-14): every Ask borrows a connection from the one pooled NpgsqlDataSource and
+// gives it back at the end of SearchAsync. The repeated commands are prepared, so the server
+// parses and plans them once per pooled connection instead of once per Ask. Prepared statements
+// belong to one server connection; behind a transaction-mode pooler such as PgBouncer an Ask can
+// land on a different one, so set Postgres:PrepareStatements to false if PgBouncer is put in front.
 public class PostgresGameSearchIndex : IGameSearchIndex
 {
     // pgvector's default is 40. Raised so a filtered search keeps enough candidates; see A-13.
@@ -31,6 +37,7 @@ public class PostgresGameSearchIndex : IGameSearchIndex
     private readonly IMeepleStore _store;
     private readonly ILogger<PostgresGameSearchIndex> _logger;
     private readonly int _efSearch;
+    private readonly bool _prepareStatements;
 
     // NpgsqlDataSource is a singleton (see Program.cs) that owns the connection pool.
     public PostgresGameSearchIndex(
@@ -58,6 +65,14 @@ public class PostgresGameSearchIndex : IGameSearchIndex
         if (_efSearch < 1 || _efSearch > 1000)
         {
             throw new InvalidOperationException("Postgres:EfSearch must be between 1 and 1000.");
+        }
+
+        // On unless switched off; see the class comment about PgBouncer
+        _prepareStatements = true;
+        string? prepareSetting = configuration["Postgres:PrepareStatements"];
+        if (!string.IsNullOrWhiteSpace(prepareSetting))
+        {
+            _prepareStatements = bool.Parse(prepareSetting);
         }
     }
 
@@ -143,15 +158,18 @@ public class PostgresGameSearchIndex : IGameSearchIndex
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync();
         await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync();
 
-        await SetLocalAsync(connection, transaction, "hnsw.ef_search", _efSearch.ToString(CultureInfo.InvariantCulture));
-        List<SearchResult> results = await RunQueryAsync(connection, transaction, askVector, table, ownedNames, maxResults);
+        await SetLocalAsync(connection, transaction, _prepareStatements, "hnsw.ef_search", _efSearch.ToString(CultureInfo.InvariantCulture));
+        List<SearchResult> results = await RunQueryAsync(connection, transaction, _prepareStatements, askVector, table, ownedNames, maxResults);
 
         if (results.Count < maxResults)
         {
             // Either fewer Games fit the Table (a true answer) or HNSW lost some to the filter.
             // An exact scan tells the two apart. At 200 rows it costs well under a millisecond.
-            await SetLocalAsync(connection, transaction, "enable_indexscan", "off");
-            List<SearchResult> exactResults = await RunQueryAsync(connection, transaction, askVector, table, ownedNames, maxResults);
+            // Not prepared: a prepared statement can keep a plan made before enable_indexscan was
+            // turned off (changing a planner setting does not make Postgres plan it again), and this
+            // is the same SQL as the first run. Unprepared, the query is planned fresh with the index off.
+            await SetLocalAsync(connection, transaction, false, "enable_indexscan", "off");
+            List<SearchResult> exactResults = await RunQueryAsync(connection, transaction, false, askVector, table, ownedNames, maxResults);
 
             if (exactResults.Count > results.Count)
             {
@@ -172,7 +190,7 @@ public class PostgresGameSearchIndex : IGameSearchIndex
     }
 
     private static async Task<List<SearchResult>> RunQueryAsync(
-        NpgsqlConnection connection, NpgsqlTransaction transaction,
+        NpgsqlConnection connection, NpgsqlTransaction transaction, bool prepare,
         Vector askVector, Table table, List<string> ownedNames, int maxResults)
     {
         await using NpgsqlCommand command = new NpgsqlCommand(BuildSql(table.OwnedOnly), connection, transaction);
@@ -184,6 +202,13 @@ public class PostgresGameSearchIndex : IGameSearchIndex
         if (table.OwnedOnly)
         {
             command.Parameters.AddWithValue("ownedNames", ownedNames.ToArray());
+        }
+
+        // The first time on a pooled connection this costs a round trip to prepare. After that
+        // Npgsql remembers the statement is prepared on that connection and skips the trip.
+        if (prepare)
+        {
+            await command.PrepareAsync();
         }
 
         List<SearchResult> results = [];
@@ -206,11 +231,15 @@ public class PostgresGameSearchIndex : IGameSearchIndex
 
     // SET LOCAL cannot take a parameter, so set_config(name, value, true) does the same job:
     // the setting lasts until the transaction ends and then goes back to the server default.
-    private static async Task SetLocalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string name, string value)
+    private static async Task SetLocalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, bool prepare, string name, string value)
     {
         await using NpgsqlCommand command = new NpgsqlCommand("SELECT set_config(@name, @value, true)", connection, transaction);
         command.Parameters.AddWithValue("name", name);
         command.Parameters.AddWithValue("value", value);
+        if (prepare)
+        {
+            await command.PrepareAsync();
+        }
         await command.ExecuteNonQueryAsync();
     }
 
