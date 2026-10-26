@@ -1014,3 +1014,46 @@ on the Linux B1 plan `meepleledger-plan`, in `rg-meepleledger` (A-33 deletes bot
 
 **Cost:** B1 is a fixed hourly charge for as long as the plan exists, whether the app is running or
 stopped. Delete the plan to stop it.
+
+## Container Apps: the worker and its revisions (A-26)
+
+```
+pwsh infra/containerapps/provision-containerapps.ps1 [-Tag <version>] [-Suffix v1]   # environment + worker, first revision
+pwsh infra/containerapps/new-revision.ps1 [-Suffix v2] [-MaxConcurrentCalls 2] [-Tag <version>]   # a second revision beside it
+pwsh infra/containerapps/revisions.ps1 [list | split | rollback [revision]]          # see, activate, deactivate revisions
+pwsh infra/containerapps/who-handled.ps1 [text] [-Hours 1]                           # which revision logged a line (Log Analytics)
+```
+
+The embed worker (A-19) runs as the container app `meepleledger-worker` in the Container Apps
+environment `meepleledger-env` (Consumption, eastus2), in `rg-meepleledger`. The environment sends every
+replica's console output to the Log Analytics workspace `meepleledger-logs`, the same one Application
+Insights uses for the function apps (A-22), so A-32 queries one place.
+
+- **The image comes from ACR by identity**, like App Service, but with a *user-assigned* identity,
+  `meepleledger-worker-id` (`AcrPull` on `meepleledgeracr` only). A system-assigned identity only exists
+  once the app does, so the first revision would try to pull before it had the role.
+- **Secrets are Container Apps secrets** (`servicebus-connection-string`, `azure-openai-key`,
+  `cosmos-key`), and the environment variables point at them with `secretRef`, so the values never show
+  in a revision's template. Endpoints and names are plain environment variables (`Cosmos__Endpoint`). The
+  app is created from a YAML file (written as JSON, which is valid YAML) because the secret values don't
+  survive the az.cmd command line. Changing a secret makes no new revision; restart the revision to pick
+  it up.
+- **Revision mode is Multiple.** Single is the default, and in single mode a new revision replaces the
+  old one. A revision is a snapshot of the *template* (image, environment variables, scale, suffix):
+  changing one of those makes a revision, pushing a new image to the same tag makes nothing.
+  `new-revision.ps1` changes `Worker__MaxConcurrentCalls` (4 in v1, 2 in v2); the worker prints it at
+  start, and puts `CONTAINER_APP_REVISION` on every log line.
+- **No ingress, so no traffic weights.** Traffic splitting by percentage is for HTTP. The worker pulls
+  from `embed-requests`, so "splitting traffic" is two active revisions competing for the queue
+  (`revisions.ps1 split`); rolling back is deactivating the newer one (`revisions.ps1 rollback`). A
+  deactivated revision keeps its template, runs no replicas and can be activated again.
+- **Min and max replicas are 1.** The default minimum is 0, and a queue worker at zero replicas
+  processes nothing until A-27 gives it a KEDA scale rule.
+- **Logs:** `az containerapp logs show --name meepleledger-worker --resource-group rg-meepleledger
+  --revision <revision> --type console --follow` streams one revision now. `who-handled.ps1` asks the
+  workspace's `ContainerAppConsoleLogs_CL` table, which has a `RevisionName_s` column; lines arrive
+  there within a minute or two.
+
+**Cost:** each active revision runs its own replica, billed per second of vCPU and memory (0.25 vCPU,
+0.5 GiB), so keep only one active. The environment is the billable boundary and stays after the app is
+deleted: delete both (`az containerapp delete`, then `az containerapp env delete`).
