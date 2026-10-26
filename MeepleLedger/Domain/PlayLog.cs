@@ -5,10 +5,15 @@
         public required string OwnerName { get; set; }
         private readonly List<Play> _plays = [];
 
+        // Raised after a new Play is recorded, with the Play. Not raised for an edit (Replace) or a
+        // removal. The PlayLogged publisher (A-20) listens here, so no page knows events exist.
+        public event Action<Play>? Recorded;
+
         public void Record(Play p)
         {
             RequireOwner(p);
             _plays.Add(p);
+            Recorded?.Invoke(p);
         }
 
         public Play? Get(Guid id) => _plays.Find(p => p.Id == id);

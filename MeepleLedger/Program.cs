@@ -1,3 +1,5 @@
+using Azure;
+using Azure.Messaging.EventGrid;
 using MeepleLedger.Components;
 using MeepleLedger.Storage;
 using Microsoft.Azure.Cosmos;
@@ -161,6 +163,35 @@ else
     builder.Services.AddSingleton<IGameSearchIndex>(services => (IGameSearchIndex)services.GetRequiredService(providerType));
 }
 
+// PlayLogged events to an Event Grid custom topic (A-20). Off by default, so the app still runs with
+// nothing but the code (ADR-0001). Needs EventGrid:TopicEndpoint and EventGrid:TopicKey when on
+// (pwsh infra/eventgrid/provision-eventgrid.ps1 sets both).
+// Switch on with: dotnet run --project MeepleLedger -- --EventGrid:Enabled=true
+string? eventGridSetting = builder.Configuration["EventGrid:Enabled"];
+bool eventGridEnabled = eventGridSetting != null && bool.Parse(eventGridSetting);
+
+if (eventGridEnabled)
+{
+    IConfiguration config = builder.Configuration;
+
+    // One client for the whole app; it is thread-safe and keeps its HTTP connection.
+    builder.Services.AddSingleton(services =>
+    {
+        // Publishing is fire and forget, but a hung call still holds a task open. Two quick retries
+        // and a 5 second timeout per try keep a dead topic from piling them up.
+        EventGridPublisherClientOptions options = new EventGridPublisherClientOptions();
+        options.Retry.MaxRetries = 2;
+        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(5);
+
+        return new EventGridPublisherClient(
+            new Uri(RequiredSetting(config, "EventGrid:TopicEndpoint")),
+            new AzureKeyCredential(RequiredSetting(config, "EventGrid:TopicKey")),
+            options);
+    });
+
+    builder.Services.AddSingleton<PlayLoggedPublisher>();
+}
+
 var app = builder.Build();
 
 // Get a startup fail if Data is not good
@@ -168,6 +199,13 @@ app.Services.GetRequiredService<IMeepleStore>();
 
 // Get a startup fail if the Search Index Provider is missing a setting
 app.Services.GetRequiredService<IGameSearchIndex>();
+
+// Nothing asks for the publisher; building it is what hooks it to PlayLog.Recorded. This also gets a
+// startup fail if an EventGrid setting is missing.
+if (eventGridEnabled)
+{
+    app.Services.GetRequiredService<PlayLoggedPublisher>();
+}
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

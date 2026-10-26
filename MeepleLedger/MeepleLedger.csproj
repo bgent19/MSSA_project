@@ -34,4 +34,9 @@
     <PackageReference Include="StackExchange.Redis" Version="3.4.5" />
   </ItemGroup>
 
+  <!-- A-20: publishes PlayLogged to an Event Grid custom topic. -->
+  <ItemGroup>
+    <PackageReference Include="Azure.Messaging.EventGrid" Version="5.0.0" />
+  </ItemGroup>
+
 </Project>

@@ -686,7 +686,8 @@ static async Task<float[]> EmbedTextAsync(HttpClient http, string url, string te
 }
 
 // The text that gets embedded for one Game. Must stay exactly the same as BuildEmbeddingText in
-// MeepleLedger.Seeder/Program.cs: the hashes in Cosmos were made by the Seeder, and if this
+// MeepleLedger.Seeder/Program.cs (and EmbeddingText.Build in MeepleLedger.Functions, A-21's copy
+// of this worker): the hashes in Cosmos were made by the Seeder, and if this
 // builds even one character differently, every vector this worker writes looks like an edit to
 // the change feed, which queues another embed, forever.
 // Lines end in "\r\n" whatever the OS (the hashes were first made on Windows, and AppendLine would

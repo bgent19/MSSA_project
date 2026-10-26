@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!-- A-20: the PlayLogged subscribers. The Web SDK only because the "webhook" command needs Kestrel;
+       the other commands are plain console loops. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Shared with the Seeder and the web app, so the secrets the provisioning scripts set are read here. -->
+    <UserSecretsId>93de1646-b3dc-4c1f-9bc8-3ebc34f364f3</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.30.1" />
+    <PackageReference Include="Azure.Storage.Queues" Version="12.28.1" />
+    <PackageReference Include="StackExchange.Redis" Version="3.4.5" />
+  </ItemGroup>
+
+</Project>

@@ -2,5 +2,7 @@
   <Project Path="MeepleLedger.Tests/MeepleLedger.Tests.csproj" />
   <Project Path="MeepleLedger.Worker/MeepleLedger.Worker.csproj" />
   <Project Path="MeepleLedger/MeepleLedger.csproj" />
+  <Project Path="MeepleLedger.Events/MeepleLedger.Events.csproj" />
+  <Project Path="MeepleLedger.Functions/MeepleLedger.Functions.csproj" />
   <Project Path="MeepleLedger.Seeder/MeepleLedger.Seeder.csproj" />
 </Solution>

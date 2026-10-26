@@ -962,8 +962,9 @@ static async Task<int> Embed()
 
 // The text that gets embedded for one Game: name, categories and mechanics as well as the Blurb,
 // so a search for "deck building" can match on the mechanic even if the Blurb never says it.
-// MeepleLedger.Worker has a copy that must build exactly the same text, or the hashes differ and
-// every vector it writes back looks like an edit to watch-cosmos (A-19). Keep the two in step.
+// MeepleLedger.Worker and MeepleLedger.Functions (EmbeddingText.Build) have copies that must build
+// exactly the same text, or the hashes differ and every vector they write back looks like an edit
+// to watch-cosmos (A-19). Keep the three in step.
 // Lines end in "\r\n" whatever the OS: the hashes were first made on Windows, and AppendLine would
 // use "\n" on Linux (where A-21's Function runs).
 static string BuildEmbeddingText(string name, List<string> categories, List<string> mechanics, string blurb)

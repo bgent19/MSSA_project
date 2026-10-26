@@ -16,11 +16,13 @@ You need the .NET 10 SDK to build and run this.
 | [MeepleLedger.Tests/](MeepleLedger.Tests/) | xUnit tests for the domain rules. |
 | [MeepleLedger.Seeder/](MeepleLedger.Seeder/) | A separate console app that creates the files in `MeepleLedger/Data/`. |
 | [MeepleLedger.Worker/](MeepleLedger.Worker/) | A console app that takes embed requests off Service Bus and writes new vectors to Cosmos DB (A-19). |
+| [MeepleLedger.Functions/](MeepleLedger.Functions/) | The same embed worker as Azure Functions (isolated worker): a Service Bus trigger, plus an HTTP API that queues a re-embed (A-21). |
+| [MeepleLedger.Events/](MeepleLedger.Events/) | A console app with the Event Grid subscribers for `PlayLogged`, a deliberately failing webhook, and a dead-letter reader (A-20). |
 | [presentation/](presentation/) | HTML slides for the project presentation. |
 | [infra/](infra/) | Scripts and policy files that create the Azure resources for the AI features. |
 | `raw/`, `data/` | Working files for the seeder. Git ignores both, so they are empty after a fresh clone. |
 
-`MSSA_project.slnx` ties the four projects together.
+`MSSA_project.slnx` ties the six projects together.
 
 ## Running the app
 
@@ -684,3 +686,154 @@ watcher publishes a request, the worker re-embeds the Game and prints how simila
 the old one, and the watcher then sees the vector write and prints `text unchanged, vector is up to
 date`. That last line means the worker and the Seeder hash the text the same way; if they did not, the
 two would loop forever.
+
+### The embed worker as Azure Functions (A-21)
+
+```
+pwsh MeepleLedger.Functions/write-local-settings.ps1     # once, and again after a key changes
+cd MeepleLedger.Functions; func start                    # needs Azure Functions Core Tools v4
+curl -X POST http://localhost:7071/api/games/Wingspan/embed   # queue a re-embed for one Game
+```
+
+`MeepleLedger.Functions` is the A-19 worker re-homed on the **isolated worker** model (.NET 10, Functions
+v4). The in-process model is retired. It has two functions:
+
+| Function | Trigger | Bindings | What it does |
+|---|---|---|---|
+| `EmbedRequest` | Service Bus queue `embed-requests` | `ServiceBusMessageActions` | The Worker's message handler: embeds the Game and patches `/embedding` and `/embeddingTextHash` in Cosmos |
+| `QueueEmbed` | HTTP `POST /api/games/{name}/embed` | Cosmos **input** (the Game by id), Service Bus **output** (the request) | 404 for an unknown Game; otherwise queues an embed request and answers 202 |
+
+`QueueEmbed` has no SDK client code: the host reads the Game and sends the message. `EmbedRequest`
+still uses the Cosmos SDK for the write, because the Cosmos output binding can only upsert a whole
+document and the write must be a patch guarded by the ETag that was read.
+
+- **Settlement moved to the host.** A function that returns normally has its message completed by the
+  host (`autoCompleteMessages` in `host.json`). Bad payloads are still dead-lettered explicitly and
+  failures still abandoned explicitly (with `lastError`, after a 5 second pause), so the three outcomes
+  and the Worker's `dlq` output are the same as A-19.
+- **The processor options moved to `host.json`:** `maxConcurrentCalls` 4, `maxAutoLockRenewalDuration`
+  5 minutes, `functionTimeout` 5 minutes (the Consumption default, spelled out). Max delivery count and
+  lock duration are on the queue, so they never changed.
+- **Settings.** Bindings are run by the Functions host, which does not read user secrets, so
+  `write-local-settings.ps1` copies them into `local.settings.json` (ignored by git, never published).
+  Binding settings are flat names (`ServiceBusConnection`, `CosmosConnection`, `CosmosDatabase`,
+  `CosmosContainer`); the code's own use `__` (`AzureOpenAI__Key`). A-22 turns each into an app setting.
+- **`AzureWebJobsStorage` is required** even though nothing here uses storage. The script points it at
+  A-20's storage account when that secret exists, otherwise at Azurite.
+- **Don't run the Worker and `func start` together** unless you want competing consumers: both take
+  from the same queue and each message goes to one of them. The Worker's `send`, `send-bad` and `dlq`
+  commands are how to drive and check the function.
+
+### Event Grid: `PlayLogged` (A-20)
+
+```
+pwsh infra/eventgrid/provision-eventgrid.ps1 [-BrokenEndpoint https://<tunnel>/api/events]
+dotnet run --project MeepleLedger -- --EventGrid:Enabled=true --RecommendationCache:Enabled=true
+dotnet run --project MeepleLedger.Events                       # the two subscribers, until Enter
+dotnet run --project MeepleLedger.Events -- webhook [status]   # fails every delivery (503), on port 5095
+dotnet run --project MeepleLedger.Events -- dead-letters [purge]
+```
+
+Logging a Play publishes a `PlayLogged` event to the Event Grid custom topic `meepleledger-plays`.
+This is the other half of the A-18 split: an embed request is *work I want done* and goes on a Service
+Bus queue, where exactly one worker must handle it. `PlayLogged` is *something happened*: the app does
+not know who listens, any number of subscribers can react, and nobody listening is fine.
+
+The event is thin: which Play, which Game, the date, and whether you own the Game. Results, location
+and duration stay in the store.
+
+```json
+{
+  "id": "62df6263-...",
+  "eventType": "MeepleLedger.PlayLogged.v1",
+  "subject": "games/Wingspan/plays/578be47f-...",
+  "dataVersion": "1",
+  "data": { "playId": "578be47f-...", "game": "Wingspan", "playedOn": "2026-10-22", "owned": false }
+}
+```
+
+- **The version is in the type.** A breaking change to the data becomes `MeepleLedger.PlayLogged.v2`,
+  and since every subscription filters on the exact type, no subscriber gets data it cannot read.
+- **The subject is a path**, most general part first, so a prefix filter can pick "every Play"
+  (`games/`) or "Plays of one Game" (`games/Wingspan/`).
+- **Fire and forget.** `PlayLoggedPublisher` listens to `PlayLog.Recorded`, so the Log a Play page
+  knows nothing about events. The Play is saved before anything is sent; a failed publish is logged
+  and the event is lost. The page never waits for or sees it. A test proves a Play is still logged
+  when Event Grid can't be reached. Editing a Play does not publish (only `Record` raises the event).
+- **Off by default** (`EventGrid:Enabled` is `false`), so the app still runs on nothing but the code
+  (ADR-0001). When on, it needs `EventGrid:TopicEndpoint` and `EventGrid:TopicKey`, which the script
+  saves into the shared user secrets, along with `EventStorage:ConnectionString`.
+
+The script creates the topic, a storage account `meepleledgerevents` (two queues and a blob container
+for dead letters), and these subscriptions:
+
+| Subscription | Filter | Delivers to | What happens |
+|---|---|---|---|
+| `recommendation-cache` | Event type + subject begins with `games/` | Storage queue `play-logged-cache` | `MeepleLedger.Events` drops the cached Recommendations (A-16) that list the Game that was played |
+| `not-owned-feed` | Event type + **advanced filter** `data.owned BoolEquals false` | Storage queue `play-logged-not-owned` | `MeepleLedger.Events` prints "You played X ... Wishlist it?" |
+| `broken-webhook` (only with `-BrokenEndpoint`) | Event type | Webhook: `MeepleLedger.Events -- webhook` through a tunnel | Fails every delivery; 5 attempts, 30 minute TTL, then dead-lettered |
+
+Every subscription dead-letters to the `eventgrid-deadletter` container.
+
+- **Subject filter first, advanced filter where it earns it.** "Not owned" is a value inside the
+  data, which a subject prefix can't express. Advanced filters are limited to 25 per subscription,
+  and each operator only works on one value type: `BoolEquals` on a boolean, `NumberIn` on a number.
+  A filter whose type doesn't match the data silently matches nothing.
+- **The az CLI gets `BoolEquals false` wrong.** `--advanced-filter data.owned BoolEquals false` is
+  stored as `true`: the CLI turns the string into a boolean, and any non-empty string is true. The
+  subscription then quietly gets only Plays of Games you *do* own. The first live run hit exactly
+  this. The script puts the value right with `update --set "filter.advancedFilters[0].value=false"`
+  (`--set` parses JSON) and warns on read-back if it is ever not `false`. Always read a filter back.
+- **Why queues and not webhooks for the working subscribers:** a webhook needs a public HTTPS URL that
+  answers the validation handshake. A queue keeps the events until `MeepleLedger.Events` reads them,
+  so the subscribers can run on a laptop and be stopped and started freely.
+- **The handshake.** Event Grid sends a `SubscriptionValidation` event while a webhook subscription
+  is being *created*, and only creates it if the answer echoes the validation code. A webhook that
+  never answers just looks broken: no events, no error. So the webhook command and the tunnel must be
+  running before the script runs with `-BrokenEndpoint`.
+- **Order is not guaranteed, delivery is at least once.** Both handlers are safe to run twice and
+  don't care which Play arrives first. A message the subscribers can't handle is retried 5 times, then
+  moved to `<queue>-poison`.
+- **The cache subscriber is a hook for now.** It drops every cached answer that lists the Game played
+  (the per-Game tag sets from A-16). Today no Reason mentions Plays, so those answers would come back
+  the same; it is where a Reason like "you last played it in May" would get its invalidation.
+
+**Watching the retries.** Install a tunnel once (`winget install Microsoft.devtunnel`, then
+`devtunnel user login`), then:
+
+1. `dotnet run --project MeepleLedger.Events -- webhook` (listens on `http://localhost:5095/api/events`)
+2. `devtunnel host -p 5095 --allow-anonymous` (prints an `https://...devtunnels.ms` URL)
+3. `pwsh infra/eventgrid/provision-eventgrid.ps1 -BrokenEndpoint https://<tunnel>/api/events`; the
+   webhook prints `handshake: answered validation code ...`
+4. Log a Play in the app. The webhook prints one line per attempt with the seconds since the first.
+5. `dotnet run --project MeepleLedger.Events -- dead-letters` prints each dead-lettered event's
+   reason, attempt count, last outcome and times.
+
+What the first live run (26 October, two Plays, endpoint answering 503) actually showed:
+
+| | 7 Wonders Duel | Scythe |
+|---|---|---|
+| Published | 14:04:24 | 14:08:43 |
+| Attempts | +0 s, +60 s, +660 s | +0 s, +60 s, +660 s |
+| Dead-letter blob written | 15:20:26 (+76 min) | 15:24:44 (+76 min) |
+| Reason | `TimeToLiveExceeded`, 3 attempts, last outcome `Busy (HTTP 503)` | the same |
+
+- **The published schedule is a floor, not a timetable.** The docs list 10 s, 30 s, 1 min, 5 min,
+  10 min, 30 min, 1 h...; what arrived was 1 min, then 10 min, then nothing for an hour. Event Grid
+  backs off harder from an endpoint that keeps failing, and adds jitter.
+- **The 30 minute TTL did not end anything at 30 minutes.** Event Grid only checks the time to live
+  and the attempt count when a retry falls due. The next one came about an hour after the third
+  attempt, so the events were dead-lettered at +76 minutes with only 3 of the 5 allowed attempts used.
+  Plan for dead-lettering to take well over the TTL, and read the reason: `TimeToLiveExceeded` and
+  `MaxDeliveryAttemptsExceeded` are different stories.
+
+`webhook 400` shows the other path: Event Grid does not retry a 400, 401, 403, 404 or 413 from a
+webhook, so the event is dead-lettered after the first attempt.
+
+**Without a dead-letter destination, an event that runs out of attempts is dropped silently.** The
+script warns if any subscription is missing one. The defaults are 30 attempts over up to 24 hours,
+which is why the broken subscription sets its own. Delete it when you're done:
+`az eventgrid event-subscription delete --name broken-webhook --source-resource-id <topic id>`.
+
+**Cost:** Event Grid bills per million operations (the first 100,000 a month are free) and the
+storage account per GB. Neither has an hourly charge. A-33 deletes `rg-meepleledger` with both in it.
