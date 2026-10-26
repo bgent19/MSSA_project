@@ -73,9 +73,13 @@ $functionApp = az functionapp list --resource-group $resourceGroup --query "[?na
 if ($functionApp -eq $functionAppName) {
     $disabled = az functionapp config appsettings list --name $functionAppName --resource-group $resourceGroup `
         --query "[?name=='AzureWebJobs.EmbedRequest.Disabled'].value" -o tsv
+    # A stop, not a warning: Flex Consumption scales out on the same queue and drains it in seconds
+    # (A-27's first run lost 161 of 200 messages to it), so the numbers would mean nothing
     if ($disabled -ne "true" -and $disabled -ne "1") {
-        Write-Host "Warning: $functionAppName's EmbedRequest function is on and will take messages too. Disable it for the test:" -ForegroundColor Yellow
-        Write-Host "  az functionapp config appsettings set --name $functionAppName --resource-group $resourceGroup --settings AzureWebJobs.EmbedRequest.Disabled=true" -ForegroundColor Yellow
+        Write-Host "FAILED: $functionAppName's EmbedRequest function is on and takes messages off $queueName too. Disable it for the test:" -ForegroundColor Red
+        Write-Host "  az functionapp config appsettings set --name $functionAppName --resource-group $resourceGroup --settings AzureWebJobs.EmbedRequest.Disabled=true"
+        Write-Host "and afterwards set it back to false (or delete the setting) to turn the function on again."
+        exit 1
     }
 }
 
@@ -102,12 +106,15 @@ while ((Get-Date) -lt $deadline) {
     Test-LastCommand "read the depth of $queueName"
     $queued = [int]$queued
 
-    $replicas = az containerapp replica list --name $appName --resource-group $resourceGroup --revision $Revision --query "length(@)" -o tsv
-    if ($LASTEXITCODE -ne 0 -or -not $replicas) {
-        # A revision at zero replicas can answer with an error instead of an empty list
-        $replicas = 0
+    # The names, counted here. Not --query "length(@)": PowerShell drops the quotes from an argument
+    # with no space in it, and az.cmd (a cmd.exe script) then reads the bare ")" as its own syntax.
+    $replicaNames = az containerapp replica list --name $appName --resource-group $resourceGroup --revision $Revision --query "[].name" -o tsv
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ("{0}  could not read the replicas, trying again" -f (Get-Date).ToString("HH:mm:ss")) -ForegroundColor Yellow
+        Start-Sleep -Seconds $IntervalSeconds
+        continue
     }
-    $replicas = [int]$replicas
+    $replicas = @($replicaNames | Where-Object { $_ }).Count
 
     $now = Get-Date
 
