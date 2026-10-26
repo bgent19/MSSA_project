@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,15 +21,19 @@ using Microsoft.Extensions.Configuration;
 //
 // Every secret (ServiceBus:ConnectionString, AzureOpenAI:*, Cosmos:*) comes from the user secrets
 // the Seeder and the web app share, never from a settings file. A-29 moves them to Key Vault.
+// In a container (A-23) there are no user secrets, so environment variables are read too, with a
+// double underscore for the colon: ServiceBus__ConnectionString. They win over user secrets.
 
 IConfiguration config = new ConfigurationBuilder()
     .AddUserSecrets<Program>()
+    .AddEnvironmentVariables()
     .Build();
 
 string? busConnectionString = config["ServiceBus:ConnectionString"];
 if (string.IsNullOrWhiteSpace(busConnectionString))
 {
-    Console.WriteLine("Missing user secret ServiceBus:ConnectionString (pwsh infra/servicebus/provision-servicebus.ps1 sets it).");
+    Console.WriteLine("Missing setting ServiceBus:ConnectionString (pwsh infra/servicebus/provision-servicebus.ps1 sets it as a user secret;");
+    Console.WriteLine("in a container set the environment variable ServiceBus__ConnectionString).");
     return 1;
 }
 
@@ -120,8 +125,8 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
 
     if (string.IsNullOrWhiteSpace(openAiEndpoint) || string.IsNullOrWhiteSpace(openAiKey) || string.IsNullOrWhiteSpace(deployment))
     {
-        Console.WriteLine("Missing user secrets. Set AzureOpenAI:Endpoint, AzureOpenAI:Key and AzureOpenAI:EmbeddingDeployment");
-        Console.WriteLine("(pwsh infra/openai/provision-openai.ps1 sets all three).");
+        Console.WriteLine("Missing settings. Set AzureOpenAI:Endpoint, AzureOpenAI:Key and AzureOpenAI:EmbeddingDeployment");
+        Console.WriteLine("(pwsh infra/openai/provision-openai.ps1 sets all three as user secrets; in a container use AzureOpenAI__Endpoint and so on).");
         return 1;
     }
 
@@ -133,8 +138,8 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
     if (string.IsNullOrWhiteSpace(cosmosEndpoint) || string.IsNullOrWhiteSpace(cosmosKey)
         || string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(containerName))
     {
-        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database and Cosmos:Container");
-        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets all four).");
+        Console.WriteLine("Missing settings. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database and Cosmos:Container");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets all four as user secrets; in a container use Cosmos__Endpoint and so on).");
         return 1;
     }
 
@@ -340,13 +345,45 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
 
     Console.WriteLine($"Worker listening on queue '{EmbedRequest.QueueName}' ({processorOptions.MaxConcurrentCalls} at a time).");
     Console.WriteLine($"Vectors are written back to {databaseName}/{containerName}.");
-    Console.WriteLine("Press Enter to stop.");
-    Console.ReadLine();
+
+    // A container has no keyboard: stdin is empty, so ReadLine would return at once and the worker
+    // would stop as soon as it started. There it waits for docker stop (SIGTERM) or Ctrl+C instead.
+    if (Console.IsInputRedirected)
+    {
+        Console.WriteLine("No console input (running in a container?). Stop with docker stop or Ctrl+C.");
+        await WaitForStopSignal();
+    }
+    else
+    {
+        Console.WriteLine("Press Enter to stop.");
+        Console.ReadLine();
+    }
 
     // Waits for messages already being handled to finish and settle before returning
     await processor.StopProcessingAsync();
     Console.WriteLine("Stopped.");
     return 0;
+}
+
+// Finishes when the process is asked to stop: SIGTERM (docker stop) or SIGINT (Ctrl+C).
+// Cancelling the signal stops .NET from ending the process straight away, so the caller still gets
+// to stop the processor and let messages in flight settle.
+static async Task WaitForStopSignal()
+{
+    TaskCompletionSource stopRequested = new TaskCompletionSource();
+
+    void OnSignal(PosixSignalContext context)
+    {
+        context.Cancel = true;
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {context.Signal} received, stopping.");
+        stopRequested.TrySetResult();
+    }
+
+    // The registrations only work while they are alive, so they are disposed after the wait
+    using PosixSignalRegistration terminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, OnSignal);
+    using PosixSignalRegistration interrupt = PosixSignalRegistration.Create(PosixSignal.SIGINT, OnSignal);
+
+    await stopRequested.Task;
 }
 
 // Queues one embed request for a Game by hand, the same message watch-cosmos sends

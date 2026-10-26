@@ -889,3 +889,46 @@ which is why the broken subscription sets its own. Delete it when you're done:
 
 **Cost:** Event Grid bills per million operations (the first 100,000 a month are free) and the
 storage account per GB. Neither has an hourly charge. A-33 deletes `rg-meepleledger` with both in it.
+
+## Running in containers (A-23)
+
+```
+docker compose up --build    # the app on http://localhost:8080, the worker, Postgres (pgvector) and Redis
+docker compose down -v       # stop, and drop the Postgres volume
+```
+
+[MeepleLedger/Dockerfile](MeepleLedger/Dockerfile) and [MeepleLedger.Worker/Dockerfile](MeepleLedger.Worker/Dockerfile)
+build from the repo root (`docker build -f MeepleLedger/Dockerfile .`), so the root
+[.dockerignore](.dockerignore) applies to both.
+
+- **Two stages.** The `sdk:10.0` image builds; the app runs on `aspnet:10.0`, the worker (a console
+  app) on `runtime:10.0`. The SDK never reaches the final image.
+- **The `.csproj` is copied and restored before the source**, so a source edit reuses the cached
+  restore layer instead of downloading every package again.
+- **`.dockerignore`** leaves out `bin/`, `obj/`, the root `raw/` and `data/` (the leading slash keeps
+  `MeepleLedger/Data`, which the app needs), `.env`, `local.settings.json` and the projects neither image
+  builds.
+- **Non-root.** Both run as the `app` user (uid 1654) the .NET images ship with, and the app listens
+  on 8080, the images' default port. No HTTPS inside the container.
+- **Nothing is baked in.** With no `.env` file the app runs on the in-memory Provider (ADR-0001) and
+  the worker exits at once, saying which setting is missing. Settings go in a gitignored `.env` next
+  to `compose.yaml`, colon written as `__` (`AzureOpenAI__Endpoint=...`). `SEARCH_INDEX_PROVIDER` and
+  `RECOMMENDATION_CACHE_ENABLED` in `.env` switch the app onto the local Postgres or Redis.
+- **The local Postgres gets the schema.** `infra/postgres/games-schema.sql` runs as an init script
+  when the volume is first created, so `upload-postgres` can fill it if `Postgres:ConnectionString`
+  points at `Host=localhost;Database=meepleledger;Username=meeple;Password=meeple-local`.
+- **The worker stops on `docker stop`.** There is no keyboard in a container, so instead of waiting
+  for Enter it waits for SIGTERM and lets messages in flight settle (compose allows 30 seconds).
+  The worker also reads environment variables now, after the user secrets.
+
+| Image | Size on disk | Compressed (what a registry stores) |
+|---|---|---|
+| `meepleledger:dev` | 405 MB | 114 MB |
+| `meepleledger-worker:dev` | 344 MB | 95 MB |
+| for comparison, `dotnet/sdk:10.0` alone | 1.31 GB | 359 MB |
+
+**Blazor Server behind a load balancer needs sticky sessions** (or the Azure SignalR Service): each
+user holds a SignalR circuit on one instance, and a request sent to another instance loses it. One
+container locally doesn't care; A-26 (Container Apps) and A-28 (AKS) will. The same goes for the
+Data Protection keys the app logs a warning about at startup: they live inside the container, so
+each replica has its own and they are lost on every restart.

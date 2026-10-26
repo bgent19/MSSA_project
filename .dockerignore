@@ -1,0 +1,37 @@
+# What docker build leaves out of the build context (A-23). Both Dockerfiles build from the repo
+# root, so this one file covers them. Anything not needed to compile goes here: it keeps the
+# context small and keeps data and secrets out of the image.
+
+# Build output from the host. The image restores and builds its own.
+**/bin/
+**/obj/
+
+# Seeder working files: BGG XML and the ~6 MB vectors file. The leading slash matters: it means the
+# folders at the repo root only, not MeepleLedger/Data, which holds the seed source the app needs.
+/raw/
+/data/
+
+# Secrets and per-machine files
+.env
+**/local.settings.json
+**/*.user
+**/appsettings.Development.json
+
+# Not needed to build either image
+.git/
+.vs/
+.vscode/
+.claude/
+.scratch/
+docs/
+issues/
+infra/
+presentation/
+MeepleLedger.Seeder/
+MeepleLedger.Tests/
+MeepleLedger.Functions/
+MeepleLedger.Events/
+*.md
+*.docx
+**/Dockerfile
+compose.yaml
