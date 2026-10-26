@@ -1057,3 +1057,48 @@ Insights uses for the function apps (A-22), so A-32 queries one place.
 **Cost:** each active revision runs its own replica, billed per second of vCPU and memory (0.25 vCPU,
 0.5 GiB), so keep only one active. The environment is the billable boundary and stays after the app is
 deleted: delete both (`az containerapp delete`, then `az containerapp env delete`).
+
+## KEDA: scaling the worker on queue depth (A-27)
+
+```
+pwsh infra/acr/build-in-acr.ps1                                  # an image with A-27's worker first
+pwsh infra/containerapps/scale-on-queue.ps1 [-Suffix v3] [-MessageCount 40] [-MaxReplicas 5] [-MaxConcurrentCalls 2] [-Tag <version>]
+pwsh infra/containerapps/watch-scale.ps1 [-Revision <name>]      # terminal 1: replicas + queue depth, times the delays
+dotnet run --project MeepleLedger.Worker -- send-many [200]      # terminal 2: back the queue up
+pwsh infra/containerapps/check-duplicates.ps1 [-Revision <name>] [-Hours 1]   # afterwards: any message processed twice?
+```
+
+`scale-on-queue.ps1` makes revision `meepleledger-worker--v3` with **min replicas 0**, **max 5**, and one
+KEDA `azure-servicebus` scale rule on `embed-requests`, then deactivates the A-26 revisions (min 1, they
+would keep running and take the messages).
+
+- **`messageCount` is messages per replica**, not a total: KEDA asks for `ceil(active messages /
+  messageCount)` replicas, capped at the max. 40 means 200 queued messages ask for exactly 5. With 1 it
+  would ask for 200.
+- **Max 5, because the worker is not the bottleneck.** The `game-embeddings` deployment allows 20K tokens
+  a minute (about 80 Game embeds); 5 replicas at 2 concurrent calls each already exceed that, so more
+  replicas would only add 429s. `Worker__MaxConcurrentCalls` is set to 2 explicitly for the same reason.
+- **The scaler has its own identity**, `meepleledger-scaler-id`, assigned to the app beside
+  `meepleledger-worker-id` and named in the rule. KEDA reads the queue depth when no replica exists, so
+  it can't use the container's connection string. Reading the message count needs the Manage right, so
+  the role is *Azure Service Bus Data Owner*, scoped to the `embed-requests` queue only. The az CLI has no
+  flag for a rule's identity, so the script PATCHes the template through `az rest`.
+- **`send-many`** reads every Game id from Cosmos and queues one request each (200 Games, 200 messages),
+  with the application property `force = true`: the worker embeds even an up-to-date Game, so every
+  message is a real embeddings call and Cosmos patch. The text and hash don't change, so the change feed
+  queues nothing more. The body is still a version 1 `EmbedRequest`.
+- **The delays differ.** Scale-out waits for KEDA's next poll (every 30 s) plus a cold start. Scale-in
+  waits for the queue to be empty for the cooldown (300 s), on purpose: a queue that refills a minute
+  later shouldn't pay for a cold start each time. At zero replicas nothing is listening, so a single
+  embed request waits up to a poll plus a cold start; that latency is the price of paying nothing while
+  idle. `watch-scale.ps1` prints both delays when the revision is back at zero.
+- **Duplicates.** The worker now logs `CONTAINER_APP_REPLICA_NAME` on every line. `check-duplicates.ps1`
+  groups the lines in Log Analytics by Service Bus sequence number: completed more than once should be
+  0 (only the lock holder can complete), and messages handled more than once (an abandon after a 429, a
+  412 from Cosmos, a lost lock) are printed in full. They are harmless because the worker is idempotent
+  and the write-back is ETag-guarded.
+- **Turn off other readers first:** a local worker, or the A-22 function app (`watch-scale.ps1` warns if
+  `meepleledger-func`'s `EmbedRequest` is not disabled).
+
+**Cost:** nothing while the queue is empty (zero replicas). A test run is a few replica-minutes plus 200
+small embeddings calls and 200 Cosmos patches.

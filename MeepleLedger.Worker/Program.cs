@@ -14,6 +14,7 @@ using Microsoft.Extensions.Configuration;
 //
 //   dotnet run --project MeepleLedger.Worker                              run the worker until Enter
 //   dotnet run --project MeepleLedger.Worker -- send <game id>            queue one embed request by hand
+//   dotnet run --project MeepleLedger.Worker -- send-many [count]         queue forced re-embeds of many Games (A-27)
 //   dotnet run --project MeepleLedger.Worker -- send-bad [missing|json|version]   queue a poison message
 //   dotnet run --project MeepleLedger.Worker -- dlq                       list the dead-letter queue
 //   dotnet run --project MeepleLedger.Worker -- dlq resubmit              put dead-lettered requests back on the queue
@@ -54,6 +55,20 @@ if (command == "send")
         return 1;
     }
     return await SendRequest(busClient, args[1]);
+}
+
+if (command == "send-many")
+{
+    int count = 200;
+    if (args.Length > 1)
+    {
+        if (!int.TryParse(args[1], out count) || count < 1)
+        {
+            PrintUsage();
+            return 1;
+        }
+    }
+    return await SendManyRequests(config, busClient, count);
 }
 
 if (command == "send-bad")
@@ -105,6 +120,7 @@ static void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  dotnet run --project MeepleLedger.Worker                               run the worker until Enter");
     Console.WriteLine("  dotnet run --project MeepleLedger.Worker -- send <game id>             queue one embed request");
+    Console.WriteLine("  dotnet run --project MeepleLedger.Worker -- send-many [count]          queue forced re-embeds (default 200)");
     Console.WriteLine("  dotnet run --project MeepleLedger.Worker -- send-bad [missing|json|version]");
     Console.WriteLine("  dotnet run --project MeepleLedger.Worker -- dlq [list|resubmit|purge]");
 }
@@ -184,12 +200,18 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         }
     }
 
-    // Container Apps sets CONTAINER_APP_REVISION in every replica (A-26). With two revisions reading
-    // the same queue, it goes on every log line so the logs show which revision handled a message.
-    // Empty when run locally or in docker compose.
+    // Container Apps sets CONTAINER_APP_REVISION and CONTAINER_APP_REPLICA_NAME in every replica.
+    // With two revisions reading the same queue (A-26), or one revision scaled out to several replicas
+    // (A-27), the replica name goes on every log line, so the logs show who handled a message. A
+    // replica name starts with its revision name. Both are empty when run locally or in docker compose.
     string revision = config["CONTAINER_APP_REVISION"] ?? "";
+    string replica = config["CONTAINER_APP_REPLICA_NAME"] ?? "";
     string revisionLabel = "";
-    if (revision != "")
+    if (replica != "")
+    {
+        revisionLabel = $" [{replica}]";
+    }
+    else if (revision != "")
     {
         revisionLabel = $" [{revision}]";
     }
@@ -260,13 +282,20 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             return;
         }
 
+        // A "force" property (set by send-many, A-27) means embed even if the vector looks up to date
+        bool force = false;
+        if (message.ApplicationProperties.TryGetValue("force", out object? forceValue) && forceValue is bool forceFlag)
+        {
+            force = forceFlag;
+        }
+
         // 3. Do the work. Anything that fails from here on might work next time: a throttled or
         //    failed embeddings call, Cosmos being busy, the Game edited between our read and our
         //    write. So it is abandoned, and Service Bus dead-letters it after the 5th delivery.
         //    A Game that is not in Cosmos at all fails the same way (see EmbedGameAsync).
         try
         {
-            string outcome = await EmbedGameAsync(request.GameId, args.CancellationToken);
+            string outcome = await EmbedGameAsync(request.GameId, force, args.CancellationToken);
             await args.CompleteMessageAsync(message, args.CancellationToken);
             Console.WriteLine($"{label} '{request.GameId}': {outcome}. Completed.");
         }
@@ -298,7 +327,9 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
     // Embeds one Game and writes the vector back. Returns what happened, for the log line.
     // Safe to run twice for the same Game: Service Bus delivers at least once, so duplicates are
     // normal, and the second run finds the vector up to date and pays for nothing.
-    async Task<string> EmbedGameAsync(string gameId, CancellationToken cancellationToken)
+    // With force (A-27's load test) it embeds anyway. The text, and so the hash, are the same, so the
+    // change feed still sees nothing to queue; a duplicate costs one more embeddings call, no more.
+    async Task<string> EmbedGameAsync(string gameId, bool force, CancellationToken cancellationToken)
     {
         // Read the Game as it is now, rather than trusting the request: the Blurb may have been
         // edited again since this was queued, and the newest text is the one worth embedding.
@@ -317,7 +348,7 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         string text = BuildEmbeddingText(game.Name, game.Categories, game.Mechanics, game.Blurb);
         string textHash = HashText(text);
 
-        if (textHash == game.EmbeddingTextHash)
+        if (textHash == game.EmbeddingTextHash && !force)
         {
             return "vector already up to date, nothing to do";
         }
@@ -348,7 +379,12 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         {
             return $"embedded (no old vector), {charge:0.00} RU";
         }
-        return $"re-embedded, similarity to the old vector {similarity:0.0000}, {charge:0.00} RU";
+        string forced = "";
+        if (force)
+        {
+            forced = " (forced)";
+        }
+        return $"re-embedded{forced}, similarity to the old vector {similarity:0.0000}, {charge:0.00} RU";
     }
 
     // Errors outside the message handler: a dropped connection, a lock that could not be renewed.
@@ -428,6 +464,97 @@ static async Task<int> SendRequest(ServiceBusClient busClient, string gameId)
     await sender.SendMessageAsync(BuildMessage(JsonSerializer.Serialize(request, EmbedRequest.JsonOptions), request.SchemaVersion));
 
     Console.WriteLine($"Queued an embed request for '{gameId}'.");
+    return 0;
+}
+
+// Queues forced re-embed requests for many Games at once (A-27), to back the queue up and watch
+// the worker scale out on queue depth. The Game ids come from Cosmos, so every request is for a real
+// Game; with more requests than Games, the ids go round again. Each message carries the application
+// property force = true, so the worker embeds even an up-to-date Game and every message is real work
+// (one embeddings call and one Cosmos patch), not an instant "nothing to do". The body is an ordinary
+// version 1 EmbedRequest, so nothing else that reads the queue has to change.
+static async Task<int> SendManyRequests(IConfiguration config, ServiceBusClient busClient, int count)
+{
+    string? cosmosEndpoint = config["Cosmos:Endpoint"];
+    string? cosmosKey = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+    string? containerName = config["Cosmos:Container"];
+
+    if (string.IsNullOrWhiteSpace(cosmosEndpoint) || string.IsNullOrWhiteSpace(cosmosKey)
+        || string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(containerName))
+    {
+        Console.WriteLine("Missing settings. Set Cosmos:Endpoint, Cosmos:Key, Cosmos:Database and Cosmos:Container");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets all four as user secrets).");
+        return 1;
+    }
+
+    // 1. Every Game id in the container
+    List<string> gameIds = new List<string>();
+    using (CosmosClient cosmos = new CosmosClient(cosmosEndpoint, cosmosKey))
+    {
+        Container games = cosmos.GetContainer(databaseName, containerName);
+        using FeedIterator<string> iterator = games.GetItemQueryIterator<string>("SELECT VALUE c.id FROM c");
+        while (iterator.HasMoreResults)
+        {
+            FeedResponse<string> page = await iterator.ReadNextAsync();
+            foreach (string id in page)
+            {
+                gameIds.Add(id);
+            }
+        }
+    }
+
+    if (gameIds.Count == 0)
+    {
+        Console.WriteLine($"No Games in {databaseName}/{containerName}. Run the Seeder's upload-cosmos first.");
+        return 1;
+    }
+
+    // 2. Send them in batches: one call to Service Bus per batch. When a batch is full (256 KB on
+    //    Standard) it is sent and a new one started.
+    await using ServiceBusSender sender = busClient.CreateSender(EmbedRequest.QueueName);
+    ServiceBusMessageBatch batch = await sender.CreateMessageBatchAsync();
+    int sent = 0;
+
+    for (int i = 0; i < count; i++)
+    {
+        EmbedRequest request = new EmbedRequest
+        {
+            SchemaVersion = EmbedRequest.CurrentSchemaVersion,
+            GameId = gameIds[i % gameIds.Count],
+            TextHash = "",
+            Reason = "scale-test",
+            DetectedAtUtc = DateTime.UtcNow,
+        };
+        ServiceBusMessage message = BuildMessage(JsonSerializer.Serialize(request, EmbedRequest.JsonOptions), request.SchemaVersion);
+        message.ApplicationProperties["force"] = true;
+
+        if (!batch.TryAddMessage(message))
+        {
+            // The batch is full: send it, then start a new one with this message in it
+            await sender.SendMessagesAsync(batch);
+            sent += batch.Count;
+            batch.Dispose();
+            batch = await sender.CreateMessageBatchAsync();
+
+            if (!batch.TryAddMessage(message))
+            {
+                Console.WriteLine("FAILED: one message is too big for an empty batch.");
+                batch.Dispose();
+                return 1;
+            }
+        }
+    }
+
+    if (batch.Count > 0)
+    {
+        await sender.SendMessagesAsync(batch);
+        sent += batch.Count;
+    }
+    batch.Dispose();
+
+    int differentGames = Math.Min(count, gameIds.Count);
+    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Queued {sent} forced embed request(s) for {differentGames} different Game(s).");
     return 0;
 }
 
@@ -830,7 +957,7 @@ class EmbedRequest
     public int SchemaVersion { get; set; }
     public string GameId { get; set; } = "";
     public string TextHash { get; set; } = "";     // the hash the change feed saw; the worker re-reads the Game anyway
-    public string Reason { get; set; } = "";       // "new" or "changed" from the change feed, "manual" or "test" from this worker
+    public string Reason { get; set; } = "";       // "new" or "changed" from the change feed; "manual", "test" or "scale-test" from this worker
     public DateTime DetectedAtUtc { get; set; }
 }
 

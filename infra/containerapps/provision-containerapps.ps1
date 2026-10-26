@@ -29,6 +29,7 @@
 #     for the same queue (revisions.ps1 split).
 #   - Min replicas 1, max 1. The default minimum is 0, and a queue worker at 0 replicas processes
 #     nothing until A-27 gives it a KEDA scale rule. 1 keeps it running until then (and billing).
+#     scale-on-queue.ps1 (A-27) makes a revision with min 0 and the rule.
 #
 # The image is deployed by its VERSION tag, never :latest (A-24): with -Tag, or by default the newest
 # worker tag in the registry that is not "latest". A new revision comes from a change to the template
