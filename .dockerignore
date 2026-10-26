@@ -41,5 +41,9 @@ MeepleLedger.Functions
 MeepleLedger.Events
 *.md
 *.docx
-**/Dockerfile
 compose.yaml
+
+# Kept on purpose (A-24): "az acr run" uploads the context and reads the task file and both
+# Dockerfiles from it. Unlike "az acr build", it does not add a file the ignore rules dropped.
+# Neither ends up in an image: the Dockerfiles only copy their own project folders.
+!infra/acr/acr-task.yaml

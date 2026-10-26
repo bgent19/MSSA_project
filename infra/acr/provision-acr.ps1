@@ -16,8 +16,12 @@
 #   - App Service (A-25), Container Apps (A-26), AKS (A-28): a managed identity with AcrPull only
 #
 # The commit trigger needs a GitHub personal access token: ACR uses it to add a webhook to the repo
-# and to clone it. Make a classic token (GitHub > Settings > Developer settings > Personal access
-# tokens) with the "repo" scope, which includes webhooks. ACR stores it with the task. Pass it in:
+# and to clone it (GitHub > Settings > Developer settings > Personal access tokens). Either:
+#   - fine-grained, on this one repo: Webhooks read and write, Contents read, Commit statuses read
+#     and write (Metadata read is added for you). Without Webhooks the create fails with
+#     "403 Forbidden ... Failed to create webhook".
+#   - classic, with the "repo" scope.
+# ACR stores it with the task. Pass it in:
 #   pwsh infra/acr/provision-acr.ps1 -GitHubToken <token>
 # The task reads acr-task.yaml from GitHub, not from this machine, so push the commit that adds it
 # first.

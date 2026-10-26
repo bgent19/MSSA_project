@@ -52,10 +52,11 @@ $version = git rev-parse --short HEAD
 Test-LastCommand "read the commit hash"
 
 if ($Run) {
-    # The task file is piped in on stdin ("--file -"). Given as a path, it would have to be inside
-    # the uploaded context, and .dockerignore leaves infra/ out.
+    # .dockerignore leaves infra/ out of the upload, but the CLI always adds the file named in --file,
+    # as it does the Dockerfile for az acr build. (Piping the file on stdin with "--file -" only works
+    # with no context, /dev/null; with one, ACR looks for a file called "-" and fails.)
     Write-Host "az acr run: $taskFile, both images, uploading the repo at commit $version..."
-    Get-Content $taskFile -Raw | az acr run --registry $registryName --file - .
+    az acr run --registry $registryName --file $taskFile .
     Test-LastCommand "az acr run"
     Write-Host ""
     Write-Host "Done. The version tag is the run id printed above (e.g. ca1). Look a run up later with:"
