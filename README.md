@@ -975,3 +975,42 @@ the resource group). It holds two repositories, `meepleledger` and `meepleledger
 
 **Cost:** Basic is a fixed daily charge for as long as the registry exists, plus storage beyond 10 GB.
 ACR Tasks bill per second of build time.
+
+## App Service for Containers (A-25)
+
+```
+pwsh infra/appservice/provision-appservice.ps1 [-Tag <version>] [-Provider InMemory|Cosmos|Postgres|Redis]
+pwsh infra/appservice/set-provider.ps1 Cosmos            # flip the Provider: one app setting, then a restart
+az webapp log tail --name meepleledger-web --resource-group rg-meepleledger   # stream the container log
+```
+
+The web app runs at https://meepleledger-web.azurewebsites.net: Web App for Containers `meepleledger-web`
+on the Linux B1 plan `meepleledger-plan`, in `rg-meepleledger` (A-33 deletes both with the resource group).
+
+- **The image comes from ACR by identity.** The app has a system-assigned managed identity with `AcrPull`
+  on `meepleledgeracr` only, and `acrUseManagedIdentityCreds` on, so the pull needs no password and the
+  registry's admin account stays off. The CLI still warns "Retrieving credentials failed" when the image
+  is set: it looks for the admin account, finds it off, and carries on. A new `AcrPull` assignment can
+  take minutes to reach the registry; the pull is refused until then, so wait rather than debug.
+- **Deployed by version tag.** By default the newest tag in the registry that isn't `latest`; `-Tag`
+  picks another one, which is how you roll back.
+- **Every setting is an app setting.** App Service hands them to the container as environment
+  variables, so nested keys use `__`: `SearchIndex__Provider`, `Cosmos__Key`. A name with a colon is
+  silently never read. The script copies the keys from the user secrets; `Cosmos:Database`, the
+  Postgres pool settings and the cache TTL are not secrets and come from `appsettings.json` in the image.
+- **`WEBSITES_PORT=8080`.** The .NET images listen on 8080 and App Service sends traffic to 80 unless told
+  otherwise. (Today's platform also reads the image's `EXPOSE 8080`, but the setting doesn't rely on it.)
+- **Always On, web sockets and ARR affinity are on.** Always On is off by default on low tiers, and then
+  the first click after 20 idle minutes waits for a cold start. A Blazor Server circuit is a SignalR
+  connection held in one instance's memory: web sockets keep it fast, and ARR affinity sends the browser
+  back to the instance that holds it. Turning affinity off makes the app randomly reload once there is
+  more than one instance.
+- **The Provider switch is ADR-0001 in public.** The same image runs on the in-memory Provider with no
+  settings at all, and on Cosmos after `set-provider.ps1 Cosmos`: no rebuild, no redeploy. The Tonight
+  page shows the change: the "matches the words of your Ask" notice disappears. Postgres would also need
+  a firewall rule for the app's outbound IP addresses (`az webapp show --query outboundIpAddresses`).
+- **Container logs** go to the app's file system (`--docker-container-logging filesystem`), for
+  `az webapp log tail`, or all at once with `az webapp log download`.
+
+**Cost:** B1 is a fixed hourly charge for as long as the plan exists, whether the app is running or
+stopped. Delete the plan to stop it.
