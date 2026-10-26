@@ -905,9 +905,10 @@ build from the repo root (`docker build -f MeepleLedger/Dockerfile .`), so the r
   app) on `runtime:10.0`. The SDK never reaches the final image.
 - **The `.csproj` is copied and restored before the source**, so a source edit reuses the cached
   restore layer instead of downloading every package again.
-- **`.dockerignore`** leaves out `bin/`, `obj/`, the root `raw/` and `data/` (the leading slash keeps
-  `MeepleLedger/Data`, which the app needs), `.env`, `local.settings.json` and the projects neither image
-  builds.
+- **`.dockerignore`** leaves out `bin/`, `obj/`, the root `raw/` and `data/` (patterns are relative
+  to the repo root, so `data` does not touch `MeepleLedger/Data`, which the app needs), `.env`,
+  `local.settings.json` and the projects neither image builds. Its patterns have no leading or
+  trailing slash, because `az acr build` reads the file too and would otherwise ignore them (A-24).
 - **Non-root.** Both run as the `app` user (uid 1654) the .NET images ship with, and the app listens
   on 8080, the images' default port. No HTTPS inside the container.
 - **Nothing is baked in.** With no `.env` file the app runs on the in-memory Provider (ADR-0001) and
@@ -932,3 +933,45 @@ user holds a SignalR circuit on one instance, and a request sent to another inst
 container locally doesn't care; A-26 (Container Apps) and A-28 (AKS) will. The same goes for the
 Data Protection keys the app logs a warning about at startup: they live inside the container, so
 each replica has its own and they are lost on every restart.
+
+## Container Registry and ACR Tasks (A-24)
+
+```
+pwsh infra/acr/provision-acr.ps1 [-GitHubToken <token>]   # registry, purge task, commit-triggered build task
+pwsh infra/acr/push-images.ps1                           # build here with Docker, push
+pwsh infra/acr/build-in-acr.ps1                          # az acr build: built by ACR, no local Docker
+pwsh infra/acr/build-in-acr.ps1 -Run                     # az acr run of infra/acr/acr-task.yaml
+pwsh infra/acr/purge-tags.ps1 [-Delete]                  # the retention purge now (dry run by default)
+```
+
+The registry is `meepleledgeracr.azurecr.io`, Basic tier, in `rg-meepleledger` (A-33 deletes it with
+the resource group). It holds two repositories, `meepleledger` and `meepleledger-worker`.
+
+- **Every image has a version tag and `latest`.** Pushed from this machine or by `az acr build`, the
+  version is the short commit hash (`meepleledger:cd8b339`); both scripts refuse to run with
+  uncommitted changes, so the hash really is the code in the image. Built by a task, it is the run id
+  (`meepleledger:ca1`), and `az acr task list-runs` shows the commit behind it. `latest` moves on every
+  push. Deploy by version tag only: with `:latest` you can't tell what is running or roll back.
+- **The admin account is off** and `provision-acr.ps1` switches it back off if it finds it on. Pushing
+  uses `az acr login` (your Azure CLI identity); A-25, A-26 and A-28 pull with a managed identity that
+  has `AcrPull`.
+- **`az acr build` vs `az acr run`.** `build` is `docker build` in the cloud: one Dockerfile, one image.
+  `run` runs a task file once, without saving a task: [acr-task.yaml](infra/acr/acr-task.yaml) builds
+  both images side by side, then pushes them in one step after both have built. The `build-images` task
+  runs the same file on every commit to `main` (pull requests don't trigger it). It reads the file from
+  GitHub, so push before you expect it to change.
+- **Both upload the repo as the build context**, filtered by `.dockerignore`. The az CLI reads that
+  file with a literal matcher: `/raw/` or `bin/` match nothing, so with A-23's original file the upload
+  was 206 MB, including `raw/`, `data/`, every `bin/` and `obj/`, and `.vs`. Without the slashes it is
+  1.9 MB.
+- **Retention:** the `purge-old-tags` task runs every Sunday at 04:00 UTC:
+  `acr purge --ago 7d --keep 5 --untagged` on both repositories. It keeps the 5 newest version tags of
+  each image, deletes older ones, and deletes untagged manifests (left behind when a tag moves, and
+  still taking up storage). `latest` is always among the newest. Basic has no automatic retention
+  policy (Premium has one, for untagged manifests), so the task is the cleanup.
+- **Tiers:** all three have the same API and ACR Tasks. Standard adds storage (100 GB vs 10) and
+  throughput; Premium adds geo-replication, private endpoints, content trust and repository-scoped
+  tokens.
+
+**Cost:** Basic is a fixed daily charge for as long as the registry exists, plus storage beyond 10 GB.
+ACR Tasks bill per second of build time.

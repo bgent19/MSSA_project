@@ -1,0 +1,32 @@
+# ACR multi-step task (A-24): build both images in Azure and push them to the registry.
+#
+# Used two ways, with the same file:
+#   - by the "build-images" task that provision-acr.ps1 creates. A commit to main on GitHub triggers
+#     it: ACR clones the repo and runs these steps, with the repo root as the build context.
+#   - by "az acr run" (build-in-acr.ps1 -Run), which uploads the local repo as the context and runs
+#     these steps once, without creating a task.
+#
+# $Registry is the registry's login server (meepleledgeracr.azurecr.io), filled in by ACR.
+# {{.Run.ID}} is the run id (e.g. "ca1"), unique for every run of every task in this registry. It is
+# the immutable version tag: "az acr task logs --run-id ca1" shows which commit that run built.
+# "latest" is moved to the newest image every run, for convenience only. Nothing deploys :latest.
+version: v1.1.0
+steps:
+  # The two builds have nothing in common, so they run side by side: when "-" means "start at once,
+  # don't wait for the step before".
+  - id: build-app
+    build: -t $Registry/meepleledger:{{.Run.ID}} -t $Registry/meepleledger:latest -f MeepleLedger/Dockerfile .
+    when: ["-"]
+
+  - id: build-worker
+    build: -t $Registry/meepleledger-worker:{{.Run.ID}} -t $Registry/meepleledger-worker:latest -f MeepleLedger.Worker/Dockerfile .
+    when: ["-"]
+
+  # Push only when both builds have finished. If either fails, nothing is pushed.
+  - id: push
+    push:
+      - $Registry/meepleledger:{{.Run.ID}}
+      - $Registry/meepleledger:latest
+      - $Registry/meepleledger-worker:{{.Run.ID}}
+      - $Registry/meepleledger-worker:latest
+    when: ["build-app", "build-worker"]

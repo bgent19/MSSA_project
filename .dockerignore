@@ -1,15 +1,22 @@
 # What docker build leaves out of the build context (A-23). Both Dockerfiles build from the repo
 # root, so this one file covers them. Anything not needed to compile goes here: it keeps the
 # context small and keeps data and secrets out of the image.
+#
+# az acr build (A-24) reads this file too, to decide what to UPLOAD to Azure, but with its own,
+# simpler matcher: it turns each line into a regex as written. Docker cleans a pattern first, so
+# "/raw/" and "raw" mean the same thing to Docker, but to az a leading or trailing slash means the
+# line never matches anything and the folder is uploaded anyway. So: no slashes at either end.
+#
+# Every pattern is relative to the repo root, for Docker and for az. "data" is the root data folder
+# only; it does not match MeepleLedger/Data, which holds the seed source the app needs.
 
 # Build output from the host. The image restores and builds its own.
-**/bin/
-**/obj/
+**/bin
+**/obj
 
-# Seeder working files: BGG XML and the ~6 MB vectors file. The leading slash matters: it means the
-# folders at the repo root only, not MeepleLedger/Data, which holds the seed source the app needs.
-/raw/
-/data/
+# Seeder working files: BGG XML and the ~6 MB vectors file
+raw
+data
 
 # Secrets and per-machine files
 .env
@@ -18,19 +25,20 @@
 **/appsettings.Development.json
 
 # Not needed to build either image
-.git/
-.vs/
-.vscode/
-.claude/
-.scratch/
-docs/
-issues/
-infra/
-presentation/
-MeepleLedger.Seeder/
-MeepleLedger.Tests/
-MeepleLedger.Functions/
-MeepleLedger.Events/
+.git
+.github
+.vs
+.vscode
+.claude
+.scratch
+docs
+issues
+infra
+presentation
+MeepleLedger.Seeder
+MeepleLedger.Tests
+MeepleLedger.Functions
+MeepleLedger.Events
 *.md
 *.docx
 **/Dockerfile
