@@ -170,15 +170,37 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         Console.WriteLine("  See them with: dotnet run --project MeepleLedger.Worker -- dlq");
     }
 
+    // Up to 4 messages at once by default. Each is one small embeddings call and one Cosmos write.
+    // The deployment allows 20K tokens a minute, so many more at once would only meet 429s.
+    // Worker:MaxConcurrentCalls overrides it (A-26 changes it to make a second Container Apps revision).
+    int maxConcurrentCalls = 4;
+    string? maxConcurrentCallsSetting = config["Worker:MaxConcurrentCalls"];
+    if (!string.IsNullOrWhiteSpace(maxConcurrentCallsSetting))
+    {
+        if (!int.TryParse(maxConcurrentCallsSetting, out maxConcurrentCalls) || maxConcurrentCalls < 1)
+        {
+            Console.WriteLine($"Worker:MaxConcurrentCalls must be a whole number of 1 or more, not '{maxConcurrentCallsSetting}'.");
+            return 1;
+        }
+    }
+
+    // Container Apps sets CONTAINER_APP_REVISION in every replica (A-26). With two revisions reading
+    // the same queue, it goes on every log line so the logs show which revision handled a message.
+    // Empty when run locally or in docker compose.
+    string revision = config["CONTAINER_APP_REVISION"] ?? "";
+    string revisionLabel = "";
+    if (revision != "")
+    {
+        revisionLabel = $" [{revision}]";
+    }
+
     ServiceBusProcessorOptions processorOptions = new ServiceBusProcessorOptions
     {
         // PeekLock (the default, spelled out): a received message is locked, not removed, until
         // the handler settles it. ReceiveAndDelete would lose the request if the worker crashed.
         ReceiveMode = ServiceBusReceiveMode.PeekLock,
 
-        // Up to 4 messages at once. Each is one small embeddings call and one Cosmos write. The
-        // deployment allows 20K tokens a minute, so many more at once would only meet 429s.
-        MaxConcurrentCalls = 4,
+        MaxConcurrentCalls = maxConcurrentCalls,
 
         // The handler settles every message itself (complete, abandon or dead-letter), so each
         // outcome is a line of code you can point at, not something that happens after it returns.
@@ -193,7 +215,7 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
     async Task HandleMessageAsync(ProcessMessageEventArgs args)
     {
         ServiceBusReceivedMessage message = args.Message;
-        string label = $"[{DateTime.Now:HH:mm:ss}] #{message.SequenceNumber} (delivery {message.DeliveryCount})";
+        string label = $"[{DateTime.Now:HH:mm:ss}]{revisionLabel} #{message.SequenceNumber} (delivery {message.DeliveryCount})";
 
         // 1. Read the body. A body that cannot be read now will not be readable on the 5th try
         //    either, so dead-letter it straight away with a reason. Throwing would only abandon
@@ -331,9 +353,9 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
 
     // Errors outside the message handler: a dropped connection, a lock that could not be renewed.
     // The processor keeps running and reconnects by itself, so this only logs.
-    static Task HandleErrorAsync(ProcessErrorEventArgs args)
+    Task HandleErrorAsync(ProcessErrorEventArgs args)
     {
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] processor error ({args.ErrorSource}): {ShortError(args.Exception)}");
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}]{revisionLabel} processor error ({args.ErrorSource}): {ShortError(args.Exception)}");
         return Task.CompletedTask;
     }
 
@@ -344,6 +366,10 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
     await processor.StartProcessingAsync();
 
     Console.WriteLine($"Worker listening on queue '{EmbedRequest.QueueName}' ({processorOptions.MaxConcurrentCalls} at a time).");
+    if (revision != "")
+    {
+        Console.WriteLine($"Container Apps revision: {revision}");
+    }
     Console.WriteLine($"Vectors are written back to {databaseName}/{containerName}.");
 
     // A container has no keyboard: stdin is empty, so ReadLine would return at once and the worker
