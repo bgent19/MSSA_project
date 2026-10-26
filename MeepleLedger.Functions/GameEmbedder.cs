@@ -166,7 +166,7 @@ public class GameEmbedder
         string? value = config[name];
         if (string.IsNullOrWhiteSpace(value))
         {
-            throw new InvalidOperationException($"Missing setting {name}. Run pwsh MeepleLedger.Functions/write-local-settings.ps1 to write local.settings.json.");
+            throw new InvalidOperationException($"Missing setting {name}. Locally, run pwsh MeepleLedger.Functions/write-local-settings.ps1; in Azure, run pwsh infra/functions/provision-functions.ps1 (code deploys do not carry app settings).");
         }
         return value;
     }

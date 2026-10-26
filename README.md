@@ -724,6 +724,58 @@ document and the write must be a patch guarded by the ETag that was read.
   from the same queue and each message goes to one of them. The Worker's `send`, `send-bad` and `dlq`
   commands are how to drive and check the function.
 
+### The function apps in Azure (A-22)
+
+```
+pwsh infra/functions/provision-functions.ps1         # apps, identities, roles, app settings; metered
+pwsh infra/functions/deploy-functions.ps1            # publish + zip deploy to meepleledger-func (Flex)
+pwsh infra/functions/deploy-functions.ps1 -Staging   # deploy to meepleledger-func-win, slot staging
+pwsh infra/functions/deploy-functions.ps1 -Swap      # swap staging <-> production, shows /api/about before and after
+```
+
+Two function apps run the same package:
+
+| App | Plan | Role |
+|---|---|---|
+| `meepleledger-func` | Flex Consumption, Linux, .NET 10 isolated | The real one: `EmbedRequest` processes `embed-requests`, `QueueEmbed` answers on its real URL |
+| `meepleledger-func-win` | Consumption, Windows, .NET 10 isolated, slot `staging` | The slot exercise only. `AzureWebJobs.EmbedRequest.Disabled` is `true`, so it never competes for messages |
+
+No single cheap plan does everything: Flex runs .NET 10 on Linux but has **no deployment slots**;
+Linux Consumption has slots but gets no new language versions (no .NET 10) and retires in September
+2028. Hence the second, Windows, app for slots.
+
+- **Service Bus through the identity.** Each app (and the staging slot, which has its *own* identity)
+  has a system-assigned managed identity with roles on the `embed-requests` queue only: the Flex app
+  gets *Azure Service Bus Data Receiver* (the trigger, and settling messages) and *Data Sender*
+  (`QueueEmbed`'s output binding); the Windows app only *Data Sender*. No code changed: with an
+  identity, `Connection = "ServiceBusConnection"` is a **prefix**, and the app setting is
+  `ServiceBusConnection__fullyQualifiedNamespace = meepleledger-bus.servicebus.windows.net`. A plain
+  `ServiceBusConnection` setting would win over it, so the script removes one if it finds it.
+  Role assignments take minutes to propagate; a trigger tested straight away can fail and then fix itself.
+- **App settings come from the user secrets**, the same names `local.settings.json` uses, and the
+  script ends by checking every local setting has its Azure counterpart. A code deploy never carries
+  them. Cosmos and Azure OpenAI still use keys (A-29 moves them to Key Vault).
+- **Slot settings.** `SlotName` is a deployment slot setting, so it stays with its slot through a
+  swap while the code moves. `GET /api/about` (anonymous) shows both: `-Swap` prints it before and
+  after, and the builds trade places while the slot names stay put.
+- **Each Consumption slot needs its own content share.** The code lives in the Azure Files share named
+  by `WEBSITE_CONTENTSHARE`, and creating a slot with `--configuration-source` copies production's
+  value. Both slots then run from one share: a deploy to staging shows up in production and a swap
+  changes nothing. The script gives the slot its own share (Azure refuses to make that setting a slot
+  setting; it is never swapped anyway).
+- **Logs** go to Application Insights `meepleledger-func-insights` on workspace `meepleledger-logs`,
+  both created in `rg-meepleledger` so deleting the group removes them. To trace one embed request
+  from send to completion (Application Insights > Logs):
+
+```kusto
+union requests, traces
+| where timestamp > ago(30m)
+| where cloud_RoleName == "meepleledger-func"
+| where operation_Name in ("QueueEmbed", "EmbedRequest")
+| project timestamp, operation_Name, itemType, message, resultCode, operation_Id
+| order by timestamp asc
+```
+
 ### Event Grid: `PlayLogged` (A-20)
 
 ```
