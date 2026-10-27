@@ -22,9 +22,15 @@
 # With nothing else under that prefix, the host uses the app's system-assigned identity. A plain
 # "ServiceBusConnection" setting would win over it, so this script deletes one if it finds it.
 #
-# Cosmos and Azure OpenAI still use keys here, read from the user secrets into app settings. Both
-# can use an identity too (Cosmos data plane RBAC, "Cognitive Services OpenAI User"), but that needs
-# credential code in GameEmbedder; A-29 moves the keys into Key Vault instead.
+# Cosmos and Azure OpenAI still use keys, but no key is an app setting (A-29). The two settings that
+# hold one, CosmosConnection and AzureOpenAI__Key, are Key Vault REFERENCES:
+#   @Microsoft.KeyVault(VaultName=meepleledger-kv;SecretName=AzureOpenAI--Key)
+# The platform reads the secret as the app's system identity (Key Vault Secrets User on the vault,
+# granted below) and hands the code the value as an ordinary setting, so the code does not change.
+# A reference with no version follows the latest version, but App Service only re-reads it every 24
+# hours, or at once on any configuration change: rotate-openai-key.ps1 makes one. Both keys could go
+# altogether with an identity (Cosmos data plane RBAC, "Cognitive Services OpenAI User"), but that
+# needs credential code in GameEmbedder. Run pwsh infra/keyvault/provision-keyvault.ps1 first.
 #
 # METERED, but close to free while idle: both apps bill per execution, the storage account per GB
 # and operation, Application Insights per GB of logs. A-33 tears them down with the resource group.
@@ -43,6 +49,8 @@ $slotName = "staging"
 
 $serviceBusNamespace = "meepleledger-bus"   # from provision-servicebus.ps1
 $queueName = "embed-requests"
+
+$vaultName = "meepleledger-kv"              # from provision-keyvault.ps1 (A-29)
 
 $userSecretsId = "93de1646-b3dc-4c1f-9bc8-3ebc34f364f3"   # the Seeder's, shared by every project
 
@@ -119,7 +127,7 @@ function Set-AppSettings([string]$appName, [string]$slot, [hashtable]$settings) 
     }
 }
 
-# 0. Read the user secrets: every key here comes from a provisioning script that already ran.
+# 0. Read the user secrets, for the settings that are NOT secret. The keys are in Key Vault.
 $secretsPath = Join-Path $env:APPDATA "Microsoft/UserSecrets/$userSecretsId/secrets.json"
 if (-not (Test-Path $secretsPath)) {
     Write-Host "FAILED: no user secrets at $secretsPath. Run the provisioning scripts first." -ForegroundColor Red
@@ -127,8 +135,8 @@ if (-not (Test-Path $secretsPath)) {
 }
 $secrets = Get-Content $secretsPath -Raw | ConvertFrom-Json -AsHashtable
 $needed = @(
-    "Cosmos:Endpoint", "Cosmos:Key", "Cosmos:Database", "Cosmos:Container",
-    "AzureOpenAI:Endpoint", "AzureOpenAI:Key", "AzureOpenAI:EmbeddingDeployment"
+    "Cosmos:Database", "Cosmos:Container",
+    "AzureOpenAI:Endpoint", "AzureOpenAI:EmbeddingDeployment"
 )
 $missing = @()
 foreach ($name in $needed) {
@@ -141,6 +149,10 @@ if ($missing.Count -gt 0) {
     Write-Host "(provision-cosmos.ps1 and provision-openai.ps1 set them)"
     exit 1
 }
+
+# The vault the Key Vault references point at.
+$vaultId = az keyvault show --name $vaultName --query id -o tsv
+Test-LastCommand "find Key Vault $vaultName (run pwsh infra/keyvault/provision-keyvault.ps1 first)"
 
 # 1. Providers and the Application Insights CLI extension.
 foreach ($provider in @("Microsoft.Web", "Microsoft.Storage", "Microsoft.Insights", "Microsoft.OperationalInsights")) {
@@ -277,15 +289,23 @@ Grant-Role $flexPrincipal "Azure Service Bus Data Sender" $queueId $flexApp
 Grant-Role $windowsPrincipal "Azure Service Bus Data Sender" $queueId $slotApp
 Grant-Role $stagingPrincipal "Azure Service Bus Data Sender" $queueId "$slotApp/$slotName"
 
+# Key Vault Secrets User on the one vault, for the Key Vault references. The slot has its own identity,
+# so it needs its own role. A new role takes minutes to work; until then a reference shows as
+# AccessToKeyVaultDenied and the app gets the reference text itself instead of the key.
+Write-Host "Key Vault Secrets User on $vaultName..."
+Grant-Role $flexPrincipal "Key Vault Secrets User" $vaultId $flexApp
+Grant-Role $windowsPrincipal "Key Vault Secrets User" $vaultId $slotApp
+Grant-Role $stagingPrincipal "Key Vault Secrets User" $vaultId "$slotApp/$slotName"
+
 # 8. App settings: every value local.settings.json has, under the name the app reads.
 #    A code deploy does NOT carry these: publishing replaces the app's files, not its configuration.
 $commonSettings = [ordered]@{
     "ServiceBusConnection__fullyQualifiedNamespace" = "$serviceBusNamespace.servicebus.windows.net"
-    "CosmosConnection" = "AccountEndpoint=$($secrets['Cosmos:Endpoint']);AccountKey=$($secrets['Cosmos:Key']);"
+    "CosmosConnection" = "@Microsoft.KeyVault(VaultName=$vaultName;SecretName=Cosmos--ConnectionString)"
     "CosmosDatabase" = $secrets["Cosmos:Database"]
     "CosmosContainer" = $secrets["Cosmos:Container"]
     "AzureOpenAI__Endpoint" = $secrets["AzureOpenAI:Endpoint"]
-    "AzureOpenAI__Key" = $secrets["AzureOpenAI:Key"]
+    "AzureOpenAI__Key" = "@Microsoft.KeyVault(VaultName=$vaultName;SecretName=AzureOpenAI--Key)"
     "AzureOpenAI__EmbeddingDeployment" = $secrets["AzureOpenAI:EmbeddingDeployment"]
 }
 
@@ -360,6 +380,14 @@ if ($flexNames -contains "ServiceBusConnection") {
     Write-Host "  WARNING: ServiceBusConnection is set; the trigger would use it instead of the identity" -ForegroundColor Yellow
     $problems++
 }
+
+# The Key Vault references: Resolved, or why not. Not a failure here, because a role granted a minute
+# ago is often not working yet; run the script again in a few minutes if they are not Resolved.
+$flexId = az functionapp show --name $flexApp --resource-group $resourceGroup --query id -o tsv
+Write-Host ""
+Write-Host "Key Vault references on ${flexApp}:"
+az rest --method get --url "https://management.azure.com$flexId/config/configreferences/appsettings?api-version=2022-03-01" `
+    --query "value[].{setting:name, status:properties.status}" -o table
 
 # Flex keeps the host name under "properties"; the Windows app has it at the top level too
 $flexHost = az functionapp show --name $flexApp --resource-group $resourceGroup --query properties.defaultHostName -o tsv

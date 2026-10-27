@@ -5,8 +5,14 @@
 #   - meepleledger-web:  a Web App for Containers on that plan, running meepleledger:<tag> from
 #                        meepleledgeracr. https://meepleledger-web.azurewebsites.net
 # then gives the app a system-assigned managed identity, grants it AcrPull on the registry only,
-# tells the app to pull with that identity, and writes the app settings from the user secrets.
-# Safe to run again: anything that exists is left alone, and the settings and image are re-applied.
+# tells the app to pull with that identity, grants it Key Vault Secrets User on meepleledger-kv (A-29),
+# and writes the app settings. Safe to run again: anything that exists is left alone, and the settings
+# and image are re-applied.
+#
+# No secret is an app setting (A-29). The app setting KeyVault__Uri points the app at the vault, and
+# the app reads every key from it as its managed identity, through DefaultAzureCredential. A secret
+# app setting left over from before A-29 is deleted. Run pwsh infra/keyvault/provision-keyvault.ps1
+# first: it makes the vault and puts the secrets in it.
 #
 # The image is pulled by IDENTITY, not with the registry's admin user name and password (that account
 # stays off, A-24). The pull needs two things:
@@ -43,6 +49,8 @@ $sku = "B1"                               # the cheapest Linux tier with Always 
 $registryName = "meepleledgeracr"         # from provision-acr.ps1
 $imageName = "meepleledger"
 
+$vaultName = "meepleledger-kv"            # from provision-keyvault.ps1 (A-29)
+
 $userSecretsId = "93de1646-b3dc-4c1f-9bc8-3ebc34f364f3"   # the Seeder's, shared by every project
 
 # Stop on the first failed az command instead of carrying on with half a setup.
@@ -58,8 +66,8 @@ if (@("InMemory", "Cosmos", "Postgres", "Redis") -notcontains $Provider) {
     exit 1
 }
 
-# 0. Read the user secrets. Cosmos and Azure OpenAI must be there; Postgres, Redis and Event Grid are
-#    copied when they are, because only the Provider that is switched on reads its settings.
+# 0. Read the user secrets, for the settings that are NOT secret (endpoints and names). The keys
+#    themselves are in Key Vault and are not read here.
 $secretsPath = Join-Path $env:APPDATA "Microsoft/UserSecrets/$userSecretsId/secrets.json"
 if (-not (Test-Path $secretsPath)) {
     Write-Host "FAILED: no user secrets at $secretsPath. Run the provisioning scripts first." -ForegroundColor Red
@@ -67,8 +75,8 @@ if (-not (Test-Path $secretsPath)) {
 }
 $secrets = Get-Content $secretsPath -Raw | ConvertFrom-Json -AsHashtable
 $needed = @(
-    "Cosmos:Endpoint", "Cosmos:Key",
-    "AzureOpenAI:Endpoint", "AzureOpenAI:Key", "AzureOpenAI:EmbeddingDeployment"
+    "Cosmos:Endpoint",
+    "AzureOpenAI:Endpoint", "AzureOpenAI:EmbeddingDeployment"
 )
 $missing = @()
 foreach ($name in $needed) {
@@ -81,6 +89,12 @@ if ($missing.Count -gt 0) {
     Write-Host "(provision-cosmos.ps1 and provision-openai.ps1 set them)"
     exit 1
 }
+
+# The vault the app reads its secrets from.
+$vaultId = az keyvault show --name $vaultName --resource-group $resourceGroup --query id -o tsv
+Test-LastCommand "find Key Vault $vaultName (run pwsh infra/keyvault/provision-keyvault.ps1 first)"
+$vaultUri = az keyvault show --name $vaultName --resource-group $resourceGroup --query properties.vaultUri -o tsv
+Test-LastCommand "read the vault URI"
 
 # 1. The registry, and the image version to run.
 $registryId = az acr show --name $registryName --resource-group $resourceGroup --query id -o tsv
@@ -165,6 +179,25 @@ else {
     Test-LastCommand "grant AcrPull to $appName"
 }
 
+# Key Vault Secrets User on the one vault: read secret values, nothing else (no writing, no listing
+# keys or certificates). Like AcrPull, a new assignment can take minutes to work; until then the app
+# fails at startup with a 403 from Key Vault, and App Service restarts it until it gets through.
+$keyVaultRole = "Key Vault Secrets User"
+$existingVaultRole = az role assignment list --role $keyVaultRole --scope $vaultId --query "[?principalId=='$principalId'].id" -o tsv
+if ($existingVaultRole) {
+    Write-Host "$appName already has $keyVaultRole on $vaultName."
+}
+else {
+    Write-Host "Granting $keyVaultRole on $vaultName to $appName..."
+    az role assignment create `
+        --assignee-object-id $principalId `
+        --assignee-principal-type ServicePrincipal `
+        --role $keyVaultRole `
+        --scope $vaultId `
+        --output none
+    Test-LastCommand "grant $keyVaultRole to $appName"
+}
+
 # 5. Site config:
 #    - acrUseManagedIdentityCreds: pull with the identity above
 #    - Always On: off by default on the lower tiers, and then the app is unloaded after 20 idle
@@ -191,33 +224,32 @@ Test-LastCommand "set ARR affinity and HTTPS only"
 #
 #    WEBSITES_PORT: App Service sends traffic to port 80 unless told otherwise, and the .NET images
 #    listen on 8080. Without it the app "deploys" fine and every request times out.
+#
+#    KeyVault__Uri: where the keys are (Cosmos:Key, AzureOpenAI:Key, the Postgres and Redis connection
+#    strings, EventGrid:TopicKey). None of them is an app setting any more.
 $settings = [ordered]@{
     "WEBSITES_PORT" = "8080"
+    "KeyVault__Uri" = $vaultUri
     "SearchIndex__Provider" = $Provider
     "Cosmos__Endpoint" = $secrets["Cosmos:Endpoint"]
-    "Cosmos__Key" = $secrets["Cosmos:Key"]
     "AzureOpenAI__Endpoint" = $secrets["AzureOpenAI:Endpoint"]
-    "AzureOpenAI__Key" = $secrets["AzureOpenAI:Key"]
     "AzureOpenAI__EmbeddingDeployment" = $secrets["AzureOpenAI:EmbeddingDeployment"]
     "RecommendationCache__Enabled" = "false"
     "EventGrid__Enabled" = "false"
 }
-# Cosmos:Database and Cosmos:Container, the Postgres pool settings and the cache TTL are not secrets:
-# they are in appsettings.json, which is inside the image. An app setting would override them.
-$optionalSecrets = [ordered]@{
-    "Postgres:ConnectionString" = "Postgres__ConnectionString"
-    "Redis:ConnectionString" = "Redis__ConnectionString"
-    "EventGrid:TopicEndpoint" = "EventGrid__TopicEndpoint"
-    "EventGrid:TopicKey" = "EventGrid__TopicKey"
+# Cosmos:Database and Cosmos:Container, the Postgres pool settings, the cache TTL and the Key Vault
+# reload interval are not secrets: they are in appsettings.json, which is inside the image. An app
+# setting would override them.
+if ($secrets.ContainsKey("EventGrid:TopicEndpoint") -and -not [string]::IsNullOrWhiteSpace($secrets["EventGrid:TopicEndpoint"])) {
+    $settings["EventGrid__TopicEndpoint"] = $secrets["EventGrid:TopicEndpoint"]
 }
-foreach ($secretName in $optionalSecrets.Keys) {
-    if ($secrets.ContainsKey($secretName) -and -not [string]::IsNullOrWhiteSpace($secrets[$secretName])) {
-        $settings[$optionalSecrets[$secretName]] = $secrets[$secretName]
-    }
-    else {
-        Write-Host "  (no $secretName user secret, so no $($optionalSecrets[$secretName]) app setting)"
-    }
+else {
+    Write-Host "  (no EventGrid:TopicEndpoint user secret, so no EventGrid__TopicEndpoint app setting)"
 }
+
+# The secret app settings from before A-29. Each would be read as a setting (though the Key Vault
+# value wins over it), and would still be a key sitting in the portal, so they are deleted.
+$oldSecretSettings = @("Cosmos__Key", "AzureOpenAI__Key", "Postgres__ConnectionString", "Redis__ConnectionString", "EventGrid__TopicKey")
 
 Write-Host "App settings on $appName..."
 $list = @()
@@ -232,6 +264,16 @@ try {
 }
 finally {
     Remove-Item $file -Force
+}
+
+$currentNames = az webapp config appsettings list --name $appName --resource-group $resourceGroup --query "[].name" -o tsv
+Test-LastCommand "list the app settings of $appName"
+foreach ($oldName in $oldSecretSettings) {
+    if ($currentNames -contains $oldName) {
+        Write-Host "  Deleting the old secret app setting $oldName (it is in Key Vault now)..."
+        az webapp config appsettings delete --name $appName --resource-group $resourceGroup --setting-names $oldName --output none
+        Test-LastCommand "delete app setting $oldName"
+    }
 }
 
 # 7. The image. Set after the settings, so the container that starts already has them.
@@ -257,8 +299,9 @@ az webapp restart --name $appName --resource-group $resourceGroup --output none
 Test-LastCommand "restart $appName"
 
 # 9. Wait for the site to answer. The first start pulls the image (a minute or two), and a new AcrPull
-#    assignment can take several more minutes to reach the registry; until then the pull is refused
-#    and App Service keeps retrying. Waiting is the fix, not debugging.
+#    or Key Vault Secrets User assignment can take several more minutes to take effect; until then the
+#    pull is refused, or the app stops at startup with a 403 from Key Vault, and App Service keeps
+#    retrying. Waiting is the fix, not debugging.
 $hostName = az webapp show --name $appName --resource-group $resourceGroup --query defaultHostName -o tsv
 $url = "https://$hostName"
 Write-Host ""
@@ -289,7 +332,8 @@ else {
 }
 Write-Host "  Plan:      $planName (Linux, $sku) in $location"
 Write-Host "  App:       $appName, image $image"
-Write-Host "  Identity:  $principalId, AcrPull on $registryName"
+Write-Host "  Identity:  $principalId, AcrPull on $registryName, $keyVaultRole on $vaultName"
+Write-Host "  Secrets:   from $vaultUri (no secret app settings)"
 Write-Host "  Provider:  $Provider"
 Write-Host ""
 Write-Host "Next:"
