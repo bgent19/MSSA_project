@@ -6,7 +6,8 @@
 #                             environment sends every container's console output to it.
 #   - meepleledger-env:       a Container Apps environment. The apps in one environment share a
 #                             network and a log destination.
-#   - meepleledger-worker-id: a user-assigned managed identity with AcrPull on the registry only
+#   - meepleledger-worker-id: a user-assigned managed identity with AcrPull on the registry and Key
+#                             Vault Secrets User on meepleledger-kv (A-29)
 #   - meepleledger-worker:    the container app, running meepleledger-worker:<tag> as its first
 #                             revision, meepleledger-worker--<suffix> (default suffix v1)
 #
@@ -14,12 +15,13 @@
 # only exists once the app does, so the very first revision would try to pull before the identity has
 # AcrPull, and fail. A user-assigned identity is made, and given its role, before the app.
 #
-# Secrets are Container Apps secrets (configuration.secrets), and the environment variables refer to
-# them by name (secretRef), so the values never show in the revision's template or in the portal's
-# environment variable list. The Service Bus connection string, the Azure OpenAI key and the Cosmos
-# key are secrets; endpoints and names are plain environment variables. A-29 moves the secrets to
-# Key Vault. Changing a secret does NOT make a new revision: running replicas keep the old value
-# until they are restarted (az containerapp revision restart).
+# No secrets in the app at all (A-29): no Container Apps secrets, no keys in environment variables.
+# KeyVault__Uri points the worker at the vault, and it reads the Service Bus connection string, the
+# Azure OpenAI key and the Cosmos key from there as meepleledger-worker-id, through
+# DefaultAzureCredential. AZURE_CLIENT_ID tells DefaultAzureCredential which user-assigned identity
+# to use: once A-27 adds the scaler identity the app has two, and it cannot guess. Endpoints and names
+# are plain environment variables. Run pwsh infra/keyvault/provision-keyvault.ps1 first. An app made
+# before A-29 still has Container Apps secrets: use-keyvault.ps1 moves it over.
 #
 # Settings chosen on purpose:
 #   - Revision mode MULTIPLE. Single is the default, and in single mode a new revision replaces the
@@ -65,6 +67,8 @@ $containerName = "worker"
 $registryName = "meepleledgeracr"         # from provision-acr.ps1
 $imageName = "meepleledger-worker"
 
+$vaultName = "meepleledger-kv"            # from provision-keyvault.ps1 (A-29)
+
 $userSecretsId = "93de1646-b3dc-4c1f-9bc8-3ebc34f364f3"   # the Seeder's, shared by every project
 
 # Stop on the first failed az command instead of carrying on with half a setup.
@@ -81,7 +85,8 @@ if ($Suffix -cnotmatch '^[a-z0-9][a-z0-9-]*$') {
     exit 1
 }
 
-# 0. Read the user secrets. The worker needs all of these (see RunWorker in MeepleLedger.Worker).
+# 0. Read the user secrets, for the settings that are NOT secret (see RunWorker in MeepleLedger.Worker).
+#    The keys themselves are in Key Vault and are not read here.
 $secretsPath = Join-Path $env:APPDATA "Microsoft/UserSecrets/$userSecretsId/secrets.json"
 if (-not (Test-Path $secretsPath)) {
     Write-Host "FAILED: no user secrets at $secretsPath. Run the provisioning scripts first." -ForegroundColor Red
@@ -89,9 +94,8 @@ if (-not (Test-Path $secretsPath)) {
 }
 $secrets = Get-Content $secretsPath -Raw | ConvertFrom-Json -AsHashtable
 $needed = @(
-    "ServiceBus:ConnectionString",
-    "AzureOpenAI:Endpoint", "AzureOpenAI:Key", "AzureOpenAI:EmbeddingDeployment",
-    "Cosmos:Endpoint", "Cosmos:Key", "Cosmos:Database", "Cosmos:Container"
+    "AzureOpenAI:Endpoint", "AzureOpenAI:EmbeddingDeployment",
+    "Cosmos:Endpoint", "Cosmos:Database", "Cosmos:Container"
 )
 $missing = @()
 foreach ($name in $needed) {
@@ -101,7 +105,7 @@ foreach ($name in $needed) {
 }
 if ($missing.Count -gt 0) {
     Write-Host "FAILED: missing user secrets: $($missing -join ', ')" -ForegroundColor Red
-    Write-Host "(provision-servicebus.ps1, provision-openai.ps1 and provision-cosmos.ps1 set them)"
+    Write-Host "(provision-openai.ps1 and provision-cosmos.ps1 set them)"
     exit 1
 }
 
@@ -112,6 +116,12 @@ az provider register --namespace Microsoft.App --wait --output none
 Test-LastCommand "register Microsoft.App"
 az provider register --namespace Microsoft.OperationalInsights --wait --output none
 Test-LastCommand "register Microsoft.OperationalInsights"
+
+# The vault the worker reads its secrets from.
+$vaultId = az keyvault show --name $vaultName --resource-group $resourceGroup --query id -o tsv
+Test-LastCommand "find Key Vault $vaultName (run pwsh infra/keyvault/provision-keyvault.ps1 first)"
+$vaultUri = az keyvault show --name $vaultName --resource-group $resourceGroup --query properties.vaultUri -o tsv
+Test-LastCommand "read the vault URI"
 
 # 2. The registry, and the image version to run.
 $registryId = az acr show --name $registryName --resource-group $resourceGroup --query id -o tsv
@@ -192,6 +202,8 @@ $identityId = az identity show --name $identityName --resource-group $resourceGr
 Test-LastCommand "read the identity id"
 $principalId = az identity show --name $identityName --resource-group $resourceGroup --query principalId -o tsv
 Test-LastCommand "read the identity principal id"
+$clientId = az identity show --name $identityName --resource-group $resourceGroup --query clientId -o tsv
+Test-LastCommand "read the identity client id"
 
 $existingRole = az role assignment list --role AcrPull --scope $registryId --query "[?principalId=='$principalId'].id" -o tsv
 if ($existingRole) {
@@ -210,12 +222,33 @@ else {
     Test-LastCommand "grant AcrPull to $identityName"
 }
 
+# Key Vault Secrets User on the one vault: read secret values, nothing else. A new assignment can take
+# minutes to work; until then the worker stops at startup with a 403 from Key Vault, and Container
+# Apps restarts it until it gets through.
+$keyVaultRole = "Key Vault Secrets User"
+$existingVaultRole = az role assignment list --role $keyVaultRole --scope $vaultId --query "[?principalId=='$principalId'].id" -o tsv
+if ($existingVaultRole) {
+    Write-Host "$identityName already has $keyVaultRole on $vaultName."
+}
+else {
+    Write-Host "Granting $keyVaultRole on $vaultName to $identityName..."
+    az role assignment create `
+        --assignee-object-id $principalId `
+        --assignee-principal-type ServicePrincipal `
+        --role $keyVaultRole `
+        --scope $vaultId `
+        --output none
+    Test-LastCommand "grant $keyVaultRole to $identityName"
+}
+
 # 6. The container app. Left alone if it exists: re-applying the template would make a new revision.
 $existingApp = az containerapp list --resource-group $resourceGroup --query "[?name=='$appName'].name" -o tsv
 if ($existingApp -eq $appName) {
     Write-Host ""
     Write-Host "Container app $appName already exists; not changed. Make a new revision with:"
     Write-Host "  pwsh infra/containerapps/new-revision.ps1"
+    Write-Host "or, if it still has Container Apps secrets from before A-29, move it to Key Vault with:"
+    Write-Host "  pwsh infra/containerapps/use-keyvault.ps1"
     Write-Host "Revisions now:"
     az containerapp revision list --name $appName --resource-group $resourceGroup `
         --query "[].{revision:name, active:properties.active, replicas:properties.replicas, state:properties.runningState, image:properties.template.containers[0].image}" -o table
@@ -223,22 +256,16 @@ if ($existingApp -eq $appName) {
 }
 
 # The whole app as one YAML file. JSON is valid YAML, so it is written with ConvertTo-Json. The file
-# goes to az, not the command line, because the secret values have ";" and "=" in them, which do not
-# survive being passed to az.cmd on Windows. It holds keys, so it is deleted straight away.
+# goes to az, not the command line, so nothing in it has to survive az.cmd's quoting on Windows. It
+# holds no keys (they are in Key Vault), but it is deleted straight away all the same.
 #
 # Environment variable names use "__" for ":" (the worker reads env vars after user secrets).
-$containerSecrets = @(
-    [ordered]@{ name = "servicebus-connection-string"; value = $secrets["ServiceBus:ConnectionString"] },
-    [ordered]@{ name = "azure-openai-key"; value = $secrets["AzureOpenAI:Key"] },
-    [ordered]@{ name = "cosmos-key"; value = $secrets["Cosmos:Key"] }
-)
 $environmentVariables = @(
-    [ordered]@{ name = "ServiceBus__ConnectionString"; secretRef = "servicebus-connection-string" },
+    [ordered]@{ name = "KeyVault__Uri"; value = $vaultUri },
+    [ordered]@{ name = "AZURE_CLIENT_ID"; value = $clientId },
     [ordered]@{ name = "AzureOpenAI__Endpoint"; value = $secrets["AzureOpenAI:Endpoint"] },
-    [ordered]@{ name = "AzureOpenAI__Key"; secretRef = "azure-openai-key" },
     [ordered]@{ name = "AzureOpenAI__EmbeddingDeployment"; value = $secrets["AzureOpenAI:EmbeddingDeployment"] },
     [ordered]@{ name = "Cosmos__Endpoint"; value = $secrets["Cosmos:Endpoint"] },
-    [ordered]@{ name = "Cosmos__Key"; secretRef = "cosmos-key" },
     [ordered]@{ name = "Cosmos__Database"; value = $secrets["Cosmos:Database"] },
     [ordered]@{ name = "Cosmos__Container"; value = $secrets["Cosmos:Container"] },
     [ordered]@{ name = "Worker__MaxConcurrentCalls"; value = "4" }
@@ -257,7 +284,6 @@ $app = [ordered]@{
         managedEnvironmentId = $environmentId
         configuration = [ordered]@{
             activeRevisionsMode = "Multiple"
-            secrets = $containerSecrets
             # Pull from the registry as the identity: no user name, no password
             registries = @(
                 [ordered]@{ server = $loginServer; identity = $identityId }
@@ -291,7 +317,9 @@ finally {
 }
 
 # 7. Wait for the revision to run. A new AcrPull assignment can take several minutes to reach the
-#    registry; until then the pull is refused and Container Apps keeps retrying. Waiting is the fix.
+#    registry, and a new Key Vault Secrets User assignment as long to reach the vault; until then the
+#    pull is refused, or the worker stops at startup with a 403, and Container Apps keeps retrying.
+#    Waiting is the fix.
 $revisionName = "$appName--$Suffix"
 Write-Host ""
 Write-Host "Waiting for $revisionName to be running (up to 10 minutes)..."
@@ -316,7 +344,8 @@ else {
 Write-Host "  Environment: $environmentName in $location, logs to $workspaceName"
 Write-Host "  App:         $appName, revision mode Multiple, no ingress, 1 replica"
 Write-Host "  Revision:    $revisionName, image $image"
-Write-Host "  Identity:    $identityName, AcrPull on $registryName"
+Write-Host "  Identity:    $identityName, AcrPull on $registryName, $keyVaultRole on $vaultName"
+Write-Host "  Secrets:     from $vaultUri (no Container Apps secrets)"
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  az containerapp logs show --name $appName --resource-group $resourceGroup --revision $revisionName --type console --follow"

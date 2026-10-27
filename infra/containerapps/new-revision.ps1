@@ -68,8 +68,9 @@ if ($existing -eq $revisionName) {
     exit 1
 }
 
-# One update: the new suffix plus the template changes. Plain values are safe on the command line;
-# the secrets are not touched (the environment variables keep pointing at them by secretRef).
+# One update: the new suffix plus the template changes. Plain values are safe on the command line.
+# Every other environment variable is kept (since A-29 the worker has no secrets in them, only
+# KeyVault__Uri and AZURE_CLIENT_ID).
 $arguments = @(
     "containerapp", "update",
     "--name", $appName,

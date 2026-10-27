@@ -754,7 +754,8 @@ Linux Consumption has slots but gets no new language versions (no .NET 10) and r
   Role assignments take minutes to propagate; a trigger tested straight away can fail and then fix itself.
 - **App settings come from the user secrets**, the same names `local.settings.json` uses, and the
   script ends by checking every local setting has its Azure counterpart. A code deploy never carries
-  them. Cosmos and Azure OpenAI still use keys (A-29 moves them to Key Vault).
+  them. Cosmos and Azure OpenAI still use keys, but since A-29 those two settings are Key Vault
+  references (`@Microsoft.KeyVault(VaultName=meepleledger-kv;SecretName=AzureOpenAI--Key)`), not keys.
 - **Slot settings.** `SlotName` is a deployment slot setting, so it stays with its slot through a
   swap while the code moves. `GET /api/about` (anonymous) shows both: `-Swap` prints it before and
   after, and the builds trade places while the slot names stay put.
@@ -994,10 +995,11 @@ on the Linux B1 plan `meepleledger-plan`, in `rg-meepleledger` (A-33 deletes bot
   take minutes to reach the registry; the pull is refused until then, so wait rather than debug.
 - **Deployed by version tag.** By default the newest tag in the registry that isn't `latest`; `-Tag`
   picks another one, which is how you roll back.
-- **Every setting is an app setting.** App Service hands them to the container as environment
-  variables, so nested keys use `__`: `SearchIndex__Provider`, `Cosmos__Key`. A name with a colon is
-  silently never read. The script copies the keys from the user secrets; `Cosmos:Database`, the
-  Postgres pool settings and the cache TTL are not secrets and come from `appsettings.json` in the image.
+- **Every setting is an app setting, except the secrets.** App Service hands app settings to the
+  container as environment variables, so nested keys use `__`: `SearchIndex__Provider`. A name with a
+  colon is silently never read. Since A-29 no key is an app setting: `KeyVault__Uri` points the app at
+  the vault and the keys come from there. `Cosmos:Database`, the Postgres pool settings and the cache
+  TTL are not secrets and come from `appsettings.json` in the image.
 - **`WEBSITES_PORT=8080`.** The .NET images listen on 8080 and App Service sends traffic to 80 unless told
   otherwise. (Today's platform also reads the image's `EXPOSE 8080`, but the setting doesn't rely on it.)
 - **Always On, web sockets and ARR affinity are on.** Always On is off by default on low tiers, and then
@@ -1032,12 +1034,11 @@ Insights uses for the function apps (A-22), so A-32 queries one place.
 - **The image comes from ACR by identity**, like App Service, but with a *user-assigned* identity,
   `meepleledger-worker-id` (`AcrPull` on `meepleledgeracr` only). A system-assigned identity only exists
   once the app does, so the first revision would try to pull before it had the role.
-- **Secrets are Container Apps secrets** (`servicebus-connection-string`, `azure-openai-key`,
-  `cosmos-key`), and the environment variables point at them with `secretRef`, so the values never show
-  in a revision's template. Endpoints and names are plain environment variables (`Cosmos__Endpoint`). The
-  app is created from a YAML file (written as JSON, which is valid YAML) because the secret values don't
-  survive the az.cmd command line. Changing a secret makes no new revision; restart the revision to pick
-  it up.
+- **No secrets in the app** (since A-29). The worker reads its keys from Key Vault; `KeyVault__Uri` and
+  `AZURE_CLIENT_ID` are its only Key Vault environment variables. Endpoints and names are plain
+  environment variables (`Cosmos__Endpoint`). Before A-29 the keys were Container Apps secrets referenced
+  by `secretRef`; `use-keyvault.ps1` moves an app made that way. Changing a Container Apps secret makes
+  no new revision; restart the revision to pick it up.
 - **Revision mode is Multiple.** Single is the default, and in single mode a new revision replaces the
   old one. A revision is a snapshot of the *template* (image, environment variables, scale, suffix):
   changing one of those makes a revision, pushing a new image to the same tag makes nothing.
@@ -1131,7 +1132,8 @@ IP in a second group, named `rg-meepleledger-aks-nodes` here so it's easy to fin
   secrets and pipes the text to `kubectl apply -f -`, so the filled-in files with real keys are never
   written to disk. Applying a manifest by hand stores the placeholder text as the value.
 - **A Secret is base64, not encryption.** `kubectl get secret meepleledger-secrets -n meepleledger -o
-  yaml` shows every key to anyone who can read the namespace. A-29 moves them to Key Vault. Each
+  yaml` shows every key to anyone who can read the namespace. A-29 moved App Service and Container
+  Apps to Key Vault but not AKS (that needs workload identity; the cluster is deleted). Each
   container gets only the keys it reads (`secretKeyRef`); the web app never sees the Service Bus
   connection string.
 - **Changing a ConfigMap or Secret restarts nothing.** A pod reads its environment once, at start.
@@ -1189,3 +1191,66 @@ behind, still billing.
 **Cost:** the control plane is free. The B2ls_v2 node and its 30 GB OS disk bill per minute while they exist,
 and so does the Service's public IP. A 90-minute sitting is cents; a node pool forgotten for a month is
 the most expensive mistake in the ticket set.
+
+## Key Vault: secrets and rotation (A-29)
+
+```
+pwsh infra/keyvault/provision-keyvault.ps1 [-CheckSoftDelete]   # vault + your role + secrets from the user secrets
+pwsh infra/appservice/provision-appservice.ps1                  # web app: KeyVault__Uri, role, old secret settings deleted
+pwsh infra/acr/build-in-acr.ps1                                  # a worker image that reads Key Vault
+pwsh infra/containerapps/use-keyvault.ps1                        # worker: new revision, Container Apps secrets deleted
+pwsh infra/functions/provision-functions.ps1                     # function apps: Key Vault references
+pwsh infra/keyvault/rotate-openai-key.ps1                        # rotation step 1: the vault moves to the other key
+pwsh infra/keyvault/rotate-openai-key.ps1 -Regenerate            # rotation step 2, after the reload interval
+dotnet run --project MeepleLedger -- --KeyVault:Uri=https://meepleledger-kv.vault.azure.net/ --SearchIndex:Provider=Cosmos
+```
+
+Every key lives in one vault, `meepleledger-kv`. The web app and the worker read it as their managed
+identity through `DefaultAzureCredential`. On this machine the same code falls through to your Azure CLI
+login (or Visual Studio's, which `DefaultAzureCredential` tries first).
+
+- **RBAC, not access policies.** Read access is the role *Key Vault Secrets User*, granted to each identity
+  on the vault alone. You get *Key Vault Secrets Officer*: even a subscription owner can't read a secret
+  in an RBAC vault without a data role. A new assignment takes minutes to work, and until then the call
+  is a 403. That is RBAC being slow, not broken. The app fails at startup and the platform restarts it
+  until the role works.
+- **Soft delete and purge protection.** Deleted secrets (and the vault itself) are kept for 7 days and
+  can't be purged early. Purge protection can't be switched off. After `az group delete` the name
+  `meepleledger-kv` stays reserved for 7 days, and `provision-keyvault.ps1` recovers the deleted vault
+  in that time. `-CheckSoftDelete` shows both: it deletes a throwaway secret, fails to purge it, and
+  recovers it.
+- **Secret names use `--` for `:`.** `AzureOpenAI--Key` is the setting `AzureOpenAI:Key`. That is the
+  configuration provider's own convention, and Key Vault allows it (names are letters, digits and `-`).
+  A single `-` would *not* work: the provider would read `AzureOpenAI-Key` as one flat setting name.
+- **It's off unless `KeyVault:Uri` is set** (ADR-0001), so a clone still runs with nothing. It's not
+  in the user secrets either, so local runs only touch the vault when you ask (`--KeyVault:Uri=...`).
+  When it's on, the app logs which provider each secret comes from, never the value.
+- **The provider caches.** It reads the vault at startup and never again unless it has a reload
+  interval: `KeyVault:ReloadIntervalMinutes` (5) in `appsettings.json`. A reload alone isn't enough
+  either. `AskEmbedder` and the worker read `AzureOpenAI:Key` on **every call** instead of once at
+  startup, so a reloaded key is actually used. The Cosmos, Postgres and Redis clients are built once
+  with their key, so rotating one of those still needs an app restart. That's not a redeploy, but it's
+  not free either.
+- **Two-key rotation.** Azure OpenAI has `key1` and `key2`. Step 1 points the secret at the key that
+  isn't in use. Both keys still work, so nothing breaks while the apps reload. Step 2 (`-Regenerate`,
+  which refuses to run before the reload interval has passed) regenerates the old key. Any app that
+  hasn't moved fails from then on. The script prints the web app's last-modified time and the worker's
+  latest revision in both steps; they don't change.
+- **Function apps use Key Vault references** (`@Microsoft.KeyVault(...)` as the app setting value): the
+  platform resolves them as the app's identity, and the code doesn't change. App Service only re-reads a
+  reference every 24 hours, or at once on a configuration change, so step 1 also sets a
+  `KeyVaultRefreshedAt` app setting on them.
+
+**What still uses a key, and why:**
+
+| Secret | Could it be an identity? | Why it's still a key |
+|---|---|---|
+| Azure OpenAI key | Yes (*Cognitive Services OpenAI User*) | It's the key this ticket rotates. With an identity there would be nothing to rotate. |
+| Cosmos key | Yes (Cosmos data plane RBAC, a SQL role assignment, not an Azure role) | The Seeder, `watch-cosmos` and the Functions binding all use the key. Moving all of them is its own ticket. |
+| Service Bus connection string (worker) | Yes; the function app already does, and KEDA's scaler too | The worker's `send`, `dlq purge` and `send-many` run from this machine with the same connection string. |
+| Postgres password | Yes (Entra authentication, a token as the password, refreshed hourly) | The server is deleted right now; Entra auth needs an Entra admin on the server and token refresh in Npgsql. |
+| Redis key | Yes (Entra on Azure Managed Redis) | The instance is deleted right now. |
+| Event Grid topic key | Yes (*EventGrid Data Sender*) | Off by default and rarely on. |
+
+**Cost:** Key Vault Standard bills per operation (a few cents per 10,000). A reload every 5 minutes is
+one list call per app, about 9,000 a month for each.

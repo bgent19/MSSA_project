@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
@@ -21,20 +23,54 @@ using Microsoft.Extensions.Configuration;
 //   dotnet run --project MeepleLedger.Worker -- dlq purge                 delete everything in the dead-letter queue
 //
 // Every secret (ServiceBus:ConnectionString, AzureOpenAI:*, Cosmos:*) comes from the user secrets
-// the Seeder and the web app share, never from a settings file. A-29 moves them to Key Vault.
-// In a container (A-23) there are no user secrets, so environment variables are read too, with a
-// double underscore for the colon: ServiceBus__ConnectionString. They win over user secrets.
+// the Seeder and the web app share, never from a settings file. In a container (A-23) there are no
+// user secrets, so environment variables are read too, with a double underscore for the colon:
+// AzureOpenAI__Endpoint. They win over user secrets.
+//
+// With KeyVault:Uri set (A-29; the environment variable KeyVault__Uri in Container Apps) the secrets
+// come from Key Vault instead, read as the managed identity (on this machine, your Azure CLI login)
+// through DefaultAzureCredential. Key Vault is added last, so it wins over both. Secret names use
+// "--" for the colon: AzureOpenAI--Key is AzureOpenAI:Key.
 
-IConfiguration config = new ConfigurationBuilder()
+IConfigurationBuilder configBuilder = new ConfigurationBuilder()
     .AddUserSecrets<Program>()
-    .AddEnvironmentVariables()
-    .Build();
+    .AddEnvironmentVariables();
+IConfiguration config = configBuilder.Build();
+
+string? keyVaultUri = config["KeyVault:Uri"];
+if (!string.IsNullOrWhiteSpace(keyVaultUri))
+{
+    // The provider reads every secret once, then keeps them. Without a reload interval it never
+    // reads them again, and a rotated key would only reach the worker when it restarted.
+    int reloadMinutes = 5;
+    string? reloadSetting = config["KeyVault:ReloadIntervalMinutes"];
+    if (!string.IsNullOrWhiteSpace(reloadSetting))
+    {
+        if (!int.TryParse(reloadSetting, out reloadMinutes) || reloadMinutes < 1)
+        {
+            Console.WriteLine($"KeyVault:ReloadIntervalMinutes must be a whole number of 1 or more, not '{reloadSetting}'.");
+            return 1;
+        }
+    }
+
+    AzureKeyVaultConfigurationOptions keyVaultOptions = new AzureKeyVaultConfigurationOptions
+    {
+        ReloadInterval = TimeSpan.FromMinutes(reloadMinutes),
+    };
+
+    // With more than one user-assigned identity on the app (the worker's and the KEDA scaler's, A-27)
+    // DefaultAzureCredential cannot guess which one to use: the AZURE_CLIENT_ID environment variable
+    // names it.
+    configBuilder.AddAzureKeyVault(new Uri(keyVaultUri), new DefaultAzureCredential(), keyVaultOptions);
+    config = configBuilder.Build();
+    Console.WriteLine($"Secrets come from Key Vault {keyVaultUri}, reloaded every {reloadMinutes} minutes.");
+}
 
 string? busConnectionString = config["ServiceBus:ConnectionString"];
 if (string.IsNullOrWhiteSpace(busConnectionString))
 {
     Console.WriteLine("Missing setting ServiceBus:ConnectionString (pwsh infra/servicebus/provision-servicebus.ps1 sets it as a user secret;");
-    Console.WriteLine("in a container set the environment variable ServiceBus__ConnectionString).");
+    Console.WriteLine("in a container it comes from Key Vault: set KeyVault__Uri, A-29).");
     return 1;
 }
 
@@ -162,8 +198,10 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
     // The deployment name goes in the URL, so the worker never refers to the model id directly
     string embeddingsUrl = openAiEndpoint.TrimEnd('/') + "/openai/deployments/" + deployment + "/embeddings?api-version=2024-10-21";
 
+    // No api-key header on the client itself: the key is read again for every Game (see
+    // EmbedGameAsync), so a key rotated in Key Vault is used without restarting the worker.
     HttpClient http = new HttpClient();
-    http.DefaultRequestHeaders.Add("api-key", openAiKey);
+    string lastOpenAiKey = openAiKey;
 
     // camelCase, the same as upload-cosmos, so the documents read back into CosmosGameDocument
     CosmosClientOptions cosmosOptions = new CosmosClientOptions
@@ -353,7 +391,20 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             return "vector already up to date, nothing to do";
         }
 
-        float[] vector = await EmbedTextAsync(http, embeddingsUrl, text, cancellationToken);
+        // Read the key now, not once at startup. With Key Vault the configuration reloads every few
+        // minutes, so after a rotation (A-29) the next Game is embedded with the new key.
+        string? key = config["AzureOpenAI:Key"];
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new InvalidOperationException("The setting AzureOpenAI:Key is gone.");
+        }
+        if (key != lastOpenAiKey)
+        {
+            Console.WriteLine("The Azure OpenAI key changed since the last Game (a Key Vault reload); using the new one.");
+            lastOpenAiKey = key;
+        }
+
+        float[] vector = await EmbedTextAsync(http, embeddingsUrl, key, text, cancellationToken);
 
         // Write only the two fields that change, and the hash WITH the vector: the change feed sees
         // this write too, and only the matching hash stops it queueing another embed (A-10).
@@ -823,7 +874,7 @@ static ServiceBusReceiver CreateDeadLetterReceiver(ServiceBusClient busClient)
 
 // Embeds one text. On a 429 it waits and tries again, doubling the wait each time (or using
 // Retry-After if the service sends it). Throws if it gives up, so the message is abandoned.
-static async Task<float[]> EmbedTextAsync(HttpClient http, string url, string text, CancellationToken cancellationToken)
+static async Task<float[]> EmbedTextAsync(HttpClient http, string url, string key, string text, CancellationToken cancellationToken)
 {
     int maxAttempts = 5;
     int waitSeconds = 2;
@@ -832,7 +883,12 @@ static async Task<float[]> EmbedTextAsync(HttpClient http, string url, string te
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++)
     {
-        HttpResponseMessage response = await http.PostAsync(url, new StringContent(body, Encoding.UTF8, "application/json"), cancellationToken);
+        // A new request each attempt: a request message can only be sent once
+        HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("api-key", key);
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        HttpResponseMessage response = await http.SendAsync(request, cancellationToken);
         string responseText = await response.Content.ReadAsStringAsync(cancellationToken);
 
         if (response.IsSuccessStatusCode)

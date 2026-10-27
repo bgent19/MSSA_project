@@ -1,4 +1,6 @@
 using Azure;
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Identity;
 using Azure.Messaging.EventGrid;
 using MeepleLedger.Components;
 using MeepleLedger.Storage;
@@ -8,6 +10,32 @@ using Pgvector.Npgsql;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Secrets from Azure Key Vault (A-29). Off unless KeyVault:Uri is set, so the app still runs with
+// nothing but the code (ADR-0001). In Azure KeyVault__Uri is an app setting, and the app reads the
+// vault as its managed identity; on this machine DefaultAzureCredential falls through to your Azure
+// CLI login. Added last, so a secret in the vault wins over user secrets and environment variables.
+// Secret names use "--" for the colon: the secret AzureOpenAI--Key is the setting AzureOpenAI:Key.
+// Try it locally with: dotnet run --project MeepleLedger -- --KeyVault:Uri=https://meepleledger-kv.vault.azure.net/
+string? keyVaultUri = builder.Configuration["KeyVault:Uri"];
+bool keyVaultEnabled = !string.IsNullOrWhiteSpace(keyVaultUri);
+int keyVaultReloadMinutes = 0;
+
+if (keyVaultEnabled)
+{
+    // The provider reads every secret once, then keeps them. Without a reload interval it never reads
+    // them again, and a rotated key would only reach the app when it restarted. Each reload is one
+    // list call to the vault, plus a read of any secret whose version changed.
+    keyVaultReloadMinutes = RequiredIntSetting(builder.Configuration, "KeyVault:ReloadIntervalMinutes");
+    AzureKeyVaultConfigurationOptions keyVaultOptions = new AzureKeyVaultConfigurationOptions
+    {
+        ReloadInterval = TimeSpan.FromMinutes(keyVaultReloadMinutes),
+    };
+
+    // Reads the vault now. No role on the vault (or a role assignment that has not reached it yet,
+    // which takes minutes) fails the launch with a 403 here.
+    builder.Configuration.AddAzureKeyVault(new Uri(keyVaultUri!), new DefaultAzureCredential(), keyVaultOptions);
+}
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
@@ -89,8 +117,9 @@ else if (searchProvider == "Cosmos")
 
     builder.Services.AddSingleton(services => new AskEmbedder(
         RequiredSetting(config, "AzureOpenAI:Endpoint"),
-        RequiredSetting(config, "AzureOpenAI:Key"),
-        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
+        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment"),
+        config,
+        services.GetRequiredService<ILogger<AskEmbedder>>()));
 
     builder.Services.AddSingleton<CosmosGameSearchIndex>();
     providerType = typeof(CosmosGameSearchIndex);
@@ -119,8 +148,9 @@ else if (searchProvider == "Postgres")
 
     builder.Services.AddSingleton(services => new AskEmbedder(
         RequiredSetting(config, "AzureOpenAI:Endpoint"),
-        RequiredSetting(config, "AzureOpenAI:Key"),
-        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
+        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment"),
+        config,
+        services.GetRequiredService<ILogger<AskEmbedder>>()));
 
     builder.Services.AddSingleton<PostgresGameSearchIndex>();
     providerType = typeof(PostgresGameSearchIndex);
@@ -132,8 +162,9 @@ else if (searchProvider == "Redis")
     // The IConnectionMultiplexer is registered above, shared with the Recommendation cache.
     builder.Services.AddSingleton(services => new AskEmbedder(
         RequiredSetting(config, "AzureOpenAI:Endpoint"),
-        RequiredSetting(config, "AzureOpenAI:Key"),
-        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment")));
+        RequiredSetting(config, "AzureOpenAI:EmbeddingDeployment"),
+        config,
+        services.GetRequiredService<ILogger<AskEmbedder>>()));
 
     builder.Services.AddSingleton<RedisGameSearchIndex>();
     providerType = typeof(RedisGameSearchIndex);
@@ -194,6 +225,19 @@ if (eventGridEnabled)
 
 var app = builder.Build();
 
+// Say where each secret is read from (the provider, never the value), so the log shows Key Vault is
+// really in use.
+if (keyVaultEnabled)
+{
+    app.Logger.LogInformation("Secrets come from Key Vault {Uri}, reloaded every {Minutes} minutes.", keyVaultUri, keyVaultReloadMinutes);
+
+    string[] secretSettings = { "AzureOpenAI:Key", "Cosmos:Key", "Postgres:ConnectionString", "Redis:ConnectionString", "EventGrid:TopicKey" };
+    foreach (string name in secretSettings)
+    {
+        app.Logger.LogInformation("  {Setting} is read from {Source}", name, SettingSource(builder.Configuration, name));
+    }
+}
+
 // Get a startup fail if Data is not good
 app.Services.GetRequiredService<IMeepleStore>();
 
@@ -235,6 +279,22 @@ static string RequiredSetting(IConfiguration config, string name)
     }
 
     return value;
+}
+
+// Which configuration provider a setting is read from. When several have it the last one added wins,
+// so look from the end. Returns the provider's name only, never the value.
+static string SettingSource(IConfigurationRoot config, string name)
+{
+    List<IConfigurationProvider> providers = config.Providers.ToList();
+    for (int i = providers.Count - 1; i >= 0; i--)
+    {
+        if (providers[i].TryGet(name, out string? value))
+        {
+            return providers[i].ToString() ?? providers[i].GetType().Name;
+        }
+    }
+
+    return "nowhere (not set)";
 }
 
 // The same, for a whole-number setting such as a pool size.

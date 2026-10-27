@@ -39,8 +39,8 @@
 #
 # The scale rule is part of the TEMPLATE, so it makes a new revision. The az CLI (2.90) has no flag for
 # a scale rule's identity, so the template is read with az containerapp show, changed, and written back
-# with a PATCH to the ARM API through az rest (body from a file: no az.cmd quoting). The template only
-# names the secrets (secretRef), it holds no values, and the secrets themselves are not sent.
+# with a PATCH to the ARM API through az rest (body from a file: no az.cmd quoting). The template holds
+# no secret values (since A-29 the worker reads them from Key Vault), and none are sent.
 #
 # The image must have A-27's worker (it reads the "force" property and logs the replica name):
 # build it first with pwsh infra/acr/build-in-acr.ps1, then this script deploys the newest version tag,
