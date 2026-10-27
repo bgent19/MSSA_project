@@ -3,75 +3,85 @@
 @inject IGameSearchIndex SearchIndex
 @inject IMeepleStore Store
 @inject ILogger<Tonight> Logger
+@inject IFeatureManager FeatureManager
 
 <PageTitle>Tonight</PageTitle>
 
-<h1>What should we play tonight?</h1>
-<p class="page-lede">Say what you're in the mood for, set up the Table, and see what fits.</p>
-
-@if (!SearchIndex.UnderstandsMeaning)
+@* A-30: hiding the nav link is not enough, the address still works. So the page checks the flag too. *@
+@if (!_featureEnabled)
 {
-    <div class="alert alert-info">
-        This search matches the words of your Ask against each game's name, categories and
-        mechanics. It does not understand what you mean, so "something cutthroat" only finds games
-        that literally use those words. Players and minutes are always respected.
-    </div>
+    <h1>Tonight</h1>
+    <p class="empty-state">The Tonight screen is switched off right now.</p>
 }
+else
+{
+    <h1>What should we play tonight?</h1>
+    <p class="page-lede">Say what you're in the mood for, set up the Table, and see what fits.</p>
 
-<form @onsubmit="FindGames">
-    <div class="mb-3">
-        <label class="form-label" for="ask">Your Ask</label>
-        <input id="ask" class="form-control" @bind="_askText"
-               placeholder="e.g. something co-operative with cards" />
-    </div>
+    @if (!SearchIndex.UnderstandsMeaning)
+    {
+        <div class="alert alert-info">
+            This search matches the words of your Ask against each game's name, categories and
+            mechanics. It does not understand what you mean, so "something cutthroat" only finds games
+            that literally use those words. Players and minutes are always respected.
+        </div>
+    }
 
-    <div class="row g-2 mb-3 align-items-end">
-        <div class="col-md-3">
-            <label class="form-label" for="players">Players at the table</label>
-            <input id="players" type="number" class="form-control" min="1" @bind="_playerCount" />
+    <form @onsubmit="FindGames">
+        <div class="mb-3">
+            <label class="form-label" for="ask">Your Ask</label>
+            <input id="ask" class="form-control" @bind="_askText"
+                   placeholder="e.g. something co-operative with cards" />
         </div>
-        <div class="col-md-3">
-            <label class="form-label" for="minutes">Minutes available</label>
-            <input id="minutes" type="number" class="form-control" min="1" @bind="_minutesAvailable" />
-        </div>
-        <div class="col-md-4">
-            <div class="form-check mb-2">
-                <input id="owned-only" class="form-check-input" type="checkbox" @bind="_ownedOnly" />
-                <label class="form-check-label" for="owned-only">Only games on my shelf</label>
+
+        <div class="row g-2 mb-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label" for="players">Players at the table</label>
+                <input id="players" type="number" class="form-control" min="1" @bind="_playerCount" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="minutes">Minutes available</label>
+                <input id="minutes" type="number" class="form-control" min="1" @bind="_minutesAvailable" />
+            </div>
+            <div class="col-md-4">
+                <div class="form-check mb-2">
+                    <input id="owned-only" class="form-check-input" type="checkbox" @bind="_ownedOnly" />
+                    <label class="form-check-label" for="owned-only">Only games on my shelf</label>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <button type="submit" class="btn btn-primary w-100">Find games</button>
             </div>
         </div>
-        <div class="col-md-2">
-            <button type="submit" class="btn btn-primary w-100">Find games</button>
-        </div>
-    </div>
-</form>
+    </form>
 
-@if (_error != null)
-{
-    <div class="alert alert-danger">@_error</div>
-}
-
-@if (_recommendations != null)
-{
-    if (_recommendations.Count == 0)
+    @if (_error != null)
     {
-        <p class="empty-state">Nothing fits that Table. Try more minutes, or untick "Only games on my shelf".</p>
+        <div class="alert alert-danger">@_error</div>
     }
-    else
+
+    @if (_recommendations != null)
     {
-        <ol class="list-group list-group-numbered">
-            @foreach (Recommendation recommendation in _recommendations)
-            {
-                <li class="list-group-item" @key="recommendation.Game.Name">
-                    <a href="games/@Uri.EscapeDataString(recommendation.Game.Name)">@recommendation.Game.Name</a>
-                    @if (!Store.Collection.Owns(recommendation.Game.Name))
-                    {
-                        <span class="badge text-bg-warning fs-6 ms-2">not owned</span>
-                    }
-                    <div class="text-muted small mt-1">@recommendation.Reason</div>
-                </li>
-            }
-        </ol>
+        if (_recommendations.Count == 0)
+        {
+            <p class="empty-state">Nothing fits that Table. Try more minutes, or untick "Only games on my shelf".</p>
+        }
+        else
+        {
+            <ol class="list-group list-group-numbered">
+                @foreach (Recommendation recommendation in _recommendations)
+                {
+                    <li class="list-group-item" @key="recommendation.Game.Name">
+                        <a href="games/@Uri.EscapeDataString(recommendation.Game.Name)">@recommendation.Game.Name</a>
+                        @if (!Store.Collection.Owns(recommendation.Game.Name))
+                        {
+                            <span class="badge text-bg-warning fs-6 ms-2">not owned</span>
+                        }
+                        <div class="text-muted small mt-1">@recommendation.Reason</div>
+                    </li>
+                }
+            </ol>
+        }
     }
 }
 
@@ -87,6 +97,14 @@
 
     private IReadOnlyList<Recommendation>? _recommendations;
     private string? _error;
+
+    // The Tonight feature flag, read when the page opens (A-30).
+    private bool _featureEnabled = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _featureEnabled = await FeatureManager.IsEnabledAsync(AppConfigKeys.TonightFeature);
+    }
 
     private async Task FindGames()
     {

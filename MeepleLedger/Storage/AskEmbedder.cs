@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -39,6 +40,10 @@ public class AskEmbedder
 
     public async Task<float[]> EmbedAsync(string text)
     {
+        // A-31: the HttpClient call below gets its own span from OpenTelemetry's HTTP
+        // instrumentation; this span names the step around it.
+        using Activity? span = SearchTelemetry.Source.StartActivity("Embed the Ask");
+
         string key = ReadKey();
         if (key != _lastKey)
         {
@@ -57,6 +62,7 @@ public class AskEmbedder
 
         if (!response.IsSuccessStatusCode)
         {
+            span?.SetStatus(ActivityStatusCode.Error, "Azure OpenAI answered " + (int)response.StatusCode);
             throw new HttpRequestException(
                 "Embedding the Ask failed: " + (int)response.StatusCode + " " + response.StatusCode + ". " + responseText);
         }
@@ -73,6 +79,7 @@ public class AskEmbedder
             i++;
         }
 
+        span?.SetTag("meepleledger.embedding.dimensions", vector.Length);
         return vector;
     }
 

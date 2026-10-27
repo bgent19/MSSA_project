@@ -1,0 +1,19 @@
+// Recommendation cache hit rate, hourly
+// How often does the Redis cache answer an Ask on its own? One "Recommendation cache lookup" span per
+// Ask while RecommendationCache:Enabled is on. A lookup that failed (Redis unreachable) is counted as
+// Skipped, not as a miss: it never asked the cache.
+//
+// meepleledger.cache.hit is a bool attribute, stored as text; lowering it first means "True" and
+// "true" both count.
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Name == "Recommendation cache lookup"
+| extend Hit = tolower(tostring(Properties["meepleledger.cache.hit"])) == "true"
+| summarize
+    Lookups = count(),
+    Hits = countif(Success == true and Hit == true),
+    Misses = countif(Success == true and Hit == false),
+    Skipped = countif(Success == false)
+    by bin(TimeGenerated, 1h)
+| extend HitRatePercent = iff(Hits + Misses == 0, real(null), round(100.0 * Hits / (Hits + Misses), 1))
+| order by TimeGenerated asc

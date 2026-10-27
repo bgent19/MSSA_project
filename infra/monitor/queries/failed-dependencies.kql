@@ -1,0 +1,16 @@
+// Failed dependency calls by target and result code
+// Which outside calls fail, and how? Azure OpenAI, Cosmos, Postgres, Redis, Service Bus... from every
+// component sending to this workspace. Our own Internal spans ("Ask", "Rank"...) are dependencies of
+// type InProc; they are left out here because they have no target, and a failure inside one shows up
+// as the failed call under it anyway.
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Success == false
+| where DependencyType != "InProc"
+| summarize
+    Failures = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    Components = make_set(AppRoleName)
+    by Target, DependencyType, ResultCode
+| order by Failures desc

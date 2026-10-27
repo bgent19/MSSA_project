@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -46,6 +47,12 @@ public class GameEmbedder
             {
                 PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
             },
+
+            // The SDK's own spans (the read and the patch) are off unless asked for (A-31)
+            CosmosClientTelemetryOptions = new CosmosClientTelemetryOptions
+            {
+                DisableDistributedTracing = false,
+            },
         };
 
         CosmosClient cosmos = new CosmosClient(cosmosConnection, cosmosOptions);
@@ -77,7 +84,11 @@ public class GameEmbedder
             return "vector already up to date, nothing to do";
         }
 
-        float[] vector = await EmbedTextAsync(text, cancellationToken);
+        float[] vector;
+        using (Activity? embedSpan = FunctionTelemetry.Source.StartActivity("Embed the Game"))
+        {
+            vector = await EmbedTextAsync(text, cancellationToken);
+        }
 
         // Write only the two fields that change, and the hash WITH the vector: the change feed sees
         // this write too, and only the matching hash stops it queueing another embed (A-10).
@@ -93,8 +104,13 @@ public class GameEmbedder
             EnableContentResponseOnWrite = false,
         };
 
-        ItemResponse<CosmosGameDocument> written = await _games.PatchItemAsync<CosmosGameDocument>(
-            gameId, new PartitionKey(gameId), operations, patchOptions, cancellationToken);
+        // The end of the cross-process trace: change feed -> Service Bus -> here -> this write
+        ItemResponse<CosmosGameDocument> written;
+        using (Activity? writeSpan = FunctionTelemetry.Source.StartActivity("Write the vector back"))
+        {
+            written = await _games.PatchItemAsync<CosmosGameDocument>(
+                gameId, new PartitionKey(gameId), operations, patchOptions, cancellationToken);
+        }
 
         double charge = read.RequestCharge + written.RequestCharge;
         double? similarity = CosineSimilarity(game.Embedding, vector);

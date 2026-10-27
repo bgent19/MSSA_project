@@ -1,0 +1,14 @@
+// Dead-lettered embed requests (alert query)
+// The query behind the alert rule meepleledger-dead-letters (provision-alert.ps1). The rule runs it
+// every 15 minutes over the last 15 minutes and fires when it returns any row. The same test as
+// queries/dead-letters-by-reason.kql, one row per message so the alert shows which ones.
+AppRequests
+| where TimeGenerated > ago(15m)
+| where Name == "Embed request"
+| extend
+    Outcome = tostring(Properties["meepleledger.outcome"]),
+    Delivery = toint(Properties["meepleledger.delivery_count"]),
+    Reason = tostring(Properties["meepleledger.outcome.reason"])
+| where Outcome == "dead-lettered" or (Outcome == "abandoned" and Delivery >= 5)
+| extend DeadLetterReason = iff(Outcome == "dead-lettered", Reason, "MaxDeliveryCountExceeded")
+| project TimeGenerated, Consumer = AppRoleName, DeadLetterReason, Delivery, Reason, OperationId

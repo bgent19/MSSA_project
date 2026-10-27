@@ -1,0 +1,20 @@
+// Asks with zero Recommendations, by Table
+// Which Tables leave people with nothing to play? The "Ask" span carries the Table's constraints and
+// the number of Recommendations returned. A failed Ask has no result count and is not counted here.
+// ZeroAsks summed over every row is the total; ZeroPercent is out of all Asks with that Table.
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where Name == "Ask"
+| extend
+    ResultCount = toint(Properties["meepleledger.result_count"]),
+    Players = toint(Properties["meepleledger.table.player_count"]),
+    Minutes = toint(Properties["meepleledger.table.minutes_available"]),
+    OwnedOnly = tolower(tostring(Properties["meepleledger.table.owned_only"])) == "true"
+| summarize
+    Asks = count(),
+    ZeroAsks = countif(ResultCount == 0),
+    LastZero = maxif(TimeGenerated, ResultCount == 0)
+    by Players, Minutes, OwnedOnly
+| where ZeroAsks > 0
+| extend ZeroPercent = round(100.0 * ZeroAsks / Asks, 1)
+| order by ZeroAsks desc

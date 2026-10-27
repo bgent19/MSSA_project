@@ -1,0 +1,12 @@
+// Ask latency over time by Provider (time chart)
+// Is the Tonight page getting slower, and on which Provider? p95 of the whole "Ask" span (cache,
+// embedding, retrieval and ranking) in 15-minute buckets, one line per Provider.
+//
+// The Ask span's Provider is the SearchIndex:Provider setting as typed ("Cosmos"), while the retrieval
+// span's is lower case ("cosmos"). Filter on either with =~ (case-insensitive), not == (exact).
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Name == "Ask"
+| extend Provider = tostring(Properties["meepleledger.provider"])
+| summarize p95 = percentile(DurationMs, 95) by Provider, bin(TimeGenerated, 15m)
+| render timechart

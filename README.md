@@ -980,8 +980,8 @@ ACR Tasks bill per second of build time.
 ## App Service for Containers (A-25)
 
 ```
-pwsh infra/appservice/provision-appservice.ps1 [-Tag <version>] [-Provider InMemory|Cosmos|Postgres|Redis]
-pwsh infra/appservice/set-provider.ps1 Cosmos            # flip the Provider: one app setting, then a restart
+pwsh infra/appservice/provision-appservice.ps1 [-Tag <version>]
+pwsh infra/appconfig/set-provider.ps1 Cosmos             # flip the Provider in App Configuration, no restart (A-30)
 az webapp log tail --name meepleledger-web --resource-group rg-meepleledger   # stream the container log
 ```
 
@@ -995,11 +995,13 @@ on the Linux B1 plan `meepleledger-plan`, in `rg-meepleledger` (A-33 deletes bot
   take minutes to reach the registry; the pull is refused until then, so wait rather than debug.
 - **Deployed by version tag.** By default the newest tag in the registry that isn't `latest`; `-Tag`
   picks another one, which is how you roll back.
-- **Every setting is an app setting, except the secrets.** App Service hands app settings to the
-  container as environment variables, so nested keys use `__`: `SearchIndex__Provider`. A name with a
-  colon is silently never read. Since A-29 no key is an app setting: `KeyVault__Uri` points the app at
-  the vault and the keys come from there. `Cosmos:Database`, the Postgres pool settings and the cache
-  TTL are not secrets and come from `appsettings.json` in the image.
+- **App settings only say where the settings are.** App Service hands app settings to the container as
+  environment variables, so nested keys use `__`: `AppConfig__Endpoint`. A name with a colon is silently
+  never read. Since A-30 the app settings are `AppConfig__Endpoint` and `AppConfig__Label=azure`, and
+  the Provider, the endpoints and (through Key Vault references) the keys are all in App Configuration;
+  `provision-appservice.ps1` deletes the old `SearchIndex__Provider`, `KeyVault__Uri` and endpoint
+  settings. `Cosmos:Database`, the Postgres pool settings and the cache TTL are not secrets and come
+  from `appsettings.json` in the image.
 - **`WEBSITES_PORT=8080`.** The .NET images listen on 8080 and App Service sends traffic to 80 unless told
   otherwise. (Today's platform also reads the image's `EXPOSE 8080`, but the setting doesn't rely on it.)
 - **Always On, web sockets and ARR affinity are on.** Always On is off by default on low tiers, and then
@@ -1008,9 +1010,10 @@ on the Linux B1 plan `meepleledger-plan`, in `rg-meepleledger` (A-33 deletes bot
   back to the instance that holds it. Turning affinity off makes the app randomly reload once there is
   more than one instance.
 - **The Provider switch is ADR-0001 in public.** The same image runs on the in-memory Provider with no
-  settings at all, and on Cosmos after `set-provider.ps1 Cosmos`: no rebuild, no redeploy. The Tonight
-  page shows the change: the "matches the words of your Ask" notice disappears. Postgres would also need
-  a firewall rule for the app's outbound IP addresses (`az webapp show --query outboundIpAddresses`).
+  settings at all, and on Cosmos after `infra/appconfig/set-provider.ps1 Cosmos`: no rebuild, no
+  redeploy, and since A-30 no restart either. The Tonight page shows the change: the "matches the words
+  of your Ask" notice disappears. Postgres would also need a firewall rule for the app's outbound IP
+  addresses (`az webapp show --query outboundIpAddresses`).
 - **Container logs** go to the app's file system (`--docker-container-logging filesystem`), for
   `az webapp log tail`, or all at once with `az webapp log download`.
 
@@ -1254,3 +1257,201 @@ login (or Visual Studio's, which `DefaultAzureCredential` tries first).
 
 **Cost:** Key Vault Standard bills per operation (a few cents per 10,000). A reload every 5 minutes is
 one list call per app, about 9,000 a month for each.
+
+## App Configuration: the Provider switch (A-30)
+
+```
+pwsh infra/appconfig/provision-appconfig.ps1 [-Sku Free|Standard]   # store, your role, settings, Key Vault references, flag, sentinel
+pwsh infra/appservice/provision-appservice.ps1                       # web app: AppConfig__Endpoint + label azure, Data Reader role
+pwsh infra/acr/build-in-acr.ps1                                       # a worker image that reads App Configuration
+pwsh infra/containerapps/use-appconfig.ps1                            # worker: new revision, KeyVault__Uri swapped for AppConfig__*
+pwsh infra/appconfig/set-provider.ps1 Postgres [-Label azure|local]  # flip the Provider: the key, then the sentinel. No restart
+pwsh infra/appconfig/set-tonight.ps1 off [-Label azure|local]        # hide the Tonight screen. No restart
+dotnet run --project MeepleLedger -- --AppConfig:Endpoint=https://meepleledger-appconfig.azconfig.io
+```
+
+The settings the web app and the worker read live in one store, `meepleledger-appconfig`. Both read it as
+their managed identity (*App Configuration Data Reader*); local auth is off, so the store has no access
+keys at all. On this machine `DefaultAzureCredential` uses your Azure CLI login, and you have *App
+Configuration Data Owner*.
+
+- **`SearchIndex:Provider` lives there, not in app settings.** The ticket called it `Providers:SearchIndex`;
+  it kept the name the code, the command line (`--SearchIndex:Provider=Cosmos`), docker compose and the
+  AKS ConfigMap already use. `appsettings.json` still says `InMemory`, so a clone with no store runs as
+  before (ADR-0001: it's all off unless `AppConfig:Endpoint` is set).
+- **Labels keep local and deployed apart.** Every app reads the keys with no label, then the keys with
+  its own label, and the label wins. `AppConfig:Label` is `local` in `appsettings.json` and `azure` as an
+  App Service app setting, so the deployed site can run Cosmos while `dotnet run` stays on InMemory.
+  Endpoints and Key Vault references are shared (no label); the Provider and the feature flag have one
+  copy per label.
+- **Key Vault references for the secrets.** `AzureOpenAI:Key`, `Cosmos:Key`,
+  `ServiceBus:ConnectionString` (and Postgres, Redis, Event Grid when the vault has them) are references
+  to `meepleledger-kv`, never values. A reference is only a link: the **app** reads the secret, as its
+  own identity, so the web app and `meepleledger-worker-id` keep *Key Vault Secrets User*. Granting a role
+  to the store does nothing. A reference to a secret that isn't in the vault stops the app at startup,
+  so the script only writes references for secrets that exist (and deletes the rest). They have no
+  version, so a rotated key (A-29) arrives with the next secret refresh (`KeyVault:ReloadIntervalMinutes`).
+- **Sentinel plus dynamic refresh.** The apps watch one key, `MeepleLedger:Sentinel`
+  (`refreshAll: true`). `set-provider.ps1` writes the Provider, *then* bumps the sentinel. Changing the
+  Provider alone does nothing until the sentinel moves: that's how several settings change together.
+  Without a registered key the store is read once at startup, like `appsettings.json` with a bill.
+- **Who triggers the refresh.** `UseAzureAppConfiguration()` checks on HTTP requests, in the background,
+  at most every `AppConfig:RefreshIntervalSeconds` (120). A click on the Tonight page is a message on
+  the Blazor circuit's web socket, not a request, so `SwitchingGameSearchIndex` also calls
+  `TryRefreshAsync` before each Ask. The worker has no requests at all: it refreshes before it embeds a
+  Game, at most every 300 seconds.
+- **The switch itself.** `SwitchingGameSearchIndex` is what the pages get as `IGameSearchIndex`. It
+  reads `SearchIndex:Provider` on every Ask and hands the Ask to that Provider, built the first time it's
+  named and kept after that. Every Provider and client is registered, but a singleton factory only runs
+  when first asked for, so an unused Provider never connects to anything.
+- **What a switch does to an Ask already running: nothing.** The Ask took its Provider when it started
+  and finishes on it (Providers are never disposed). Only Asks that start afterwards go to the new one.
+  A switch to a Provider that can't run (no server, missing setting) fails each Ask with "The search is
+  unavailable" and logs why. It does *not* fall back to the old Provider, because that would hide the
+  mistake. Switch back and the next Ask works; no restart either way. Only the Provider named at
+  startup is checked at startup.
+- **The `Tonight` feature flag.** It lives under the reserved prefix `.appconfig.featureflag/` as JSON,
+  is read with `IFeatureManager` (`Microsoft.FeatureManagement`), and flags refresh on their own
+  interval, no sentinel. The nav menu reads it on every page load; the page checks it too, because
+  hiding the link doesn't stop anyone typing `/tonight`. With no store it comes from
+  `FeatureManagement:Tonight: true` in `appsettings.json` (a flag from App Configuration wins over it).
+- **The Free tier's quota.** 1,000 requests a day per store, then HTTP 429 until midnight UTC. A refresh
+  check is about two requests (the sentinel, and the flags), and the apps only check when something
+  happens, at most every 120 or 300 seconds. App Service's Always On pings count as requests, so an
+  idle site still uses a few hundred a day. Running out doesn't show as an error: the apps keep the
+  settings they have, so it looks like the switch "didn't work". A shorter interval across several
+  replicas would get there quickly.
+
+**Flipping the deployed site.** Run `set-provider.ps1` with InMemory, then Postgres, then Cosmos, then
+Redis. Wait out the refresh interval each time and Ask on https://meepleledger-web.azurewebsites.net/tonight.
+`az webapp log tail` shows "Search Index Provider switched from ... to ...", and the word-matching notice
+goes away after InMemory. Postgres and Redis must exist (their servers are deleted between sessions), with
+their connection strings in Key Vault (then re-run `provision-appconfig.ps1` for the references), and
+Postgres needs a firewall rule for the app's outbound IPs.
+
+**Cost:** Free costs nothing (one Free store per subscription). Standard is about $1.20 a day.
+
+## OpenTelemetry: one trace from Ask to Recommendation (A-31)
+
+```
+pwsh infra/monitor/connect-appinsights.ps1                 # one Application Insights for all: user secret, App Configuration key, restarts
+pwsh MeepleLedger.Functions/write-local-settings.ps1       # so func start sends traces too
+dotnet run --project MeepleLedger.Seeder -- watch-cosmos   # edit a Blurb: it prints the trace id of the batch
+dotnet run --project MeepleLedger.Worker -- send Azul      # or queue one by hand: it prints the trace id
+```
+
+Every component sends OpenTelemetry traces to **one** Application Insights resource,
+`meepleledger-func-insights` (made by A-22 for the function apps; despite the name it's the solution's
+only one). Separate resources would mean separate application maps and broken cross-process traces.
+Tracing is off unless `AzureMonitor:ConnectionString` is set (ADR-0001); the function apps read the
+platform's own `APPLICATIONINSIGHTS_CONNECTION_STRING`.
+
+| Component | Service name (box on the map) | How |
+|---|---|---|
+| Web app | `meepleledger-web` | `Azure.Monitor.OpenTelemetry.AspNetCore` (the distro): ASP.NET Core, HttpClient, Azure SDKs, plus the `Npgsql`, Blazor and `MeepleLedger.Search` sources |
+| Worker | `meepleledger-worker` | OpenTelemetry SDK + Azure Monitor exporter: HttpClient, Azure SDKs, `MeepleLedger.Worker` |
+| Change feed (`watch-cosmos`) | `meepleledger-change-feed` | the same, with only `MeepleLedger.ChangeFeed` and the Service Bus SDK |
+| Function app | the app's name | `telemetryMode: OpenTelemetry` in `host.json`, `UseFunctionsWorkerDefaults()` + `UseAzureMonitorExporter()` |
+
+**The spans of one Ask** (`SearchTelemetry`):
+
+```
+Microsoft.AspNetCore.Components.HandleEvent        Blazor (.NET 10): the "Find games" click
+  Ask                                              Provider, Table (players, minutes, owned only), result count
+    Recommendation cache lookup                    Redis client span, hit or miss (only with the cache on)
+    Embed the Ask                                  + the HTTP POST to Azure OpenAI under it
+    Query the Search Index                         + Cosmos (with its RU charge), Npgsql, or FT.SEARCH under it
+    Rank                                           tie-breaks, Reasons, ranks
+```
+
+**The cross-process trace**, one trace id from end to end:
+
+```
+Change feed batch                       meepleledger-change-feed
+  Queue embed request (Producer)        puts traceparent on the message
+    ServiceBusSender.Send               Service Bus SDK
+      Embed request (Consumer)          meepleledger-func or meepleledger-worker, parent from traceparent
+        Cosmos read, Embed the Game (+ HTTP), Write the vector back (+ Cosmos patch)
+```
+
+- **Trace context doesn't cross a queue by itself.** The sender writes the current span's id into the
+  message's `traceparent` application property (W3C format; `Activity.Id` already is one). The
+  receiver reads it (or `Diagnostic-Id`, the Service Bus SDK's name for the same value) and starts its
+  span with that parent. The Function does this too instead of trusting the host's trigger span. Newer
+  messaging conventions *link* consumer to producer rather than parenting it, and a link isn't the one
+  trace id the ticket asks for. `send-many` starts no span of ours (200 messages under one span helps
+  nobody), so each of its messages only has the `Diagnostic-Id` the Service Bus SDK stamps on it.
+- **Blazor Server clicks are not requests.** Only the first page load is an HTTP request; the "Find
+  games" click travels over the SignalR circuit. Without the `Microsoft.AspNetCore.Components` sources
+  the Ask would start a trace of its own with nothing above it. With them, Blazor's own `HandleEvent`
+  span is its parent.
+- **Auto-instrumentation.** The distro covers HTTP in and out and the Azure SDKs. Cosmos also needs
+  `DisableDistributedTracing = false` on every `CosmosClient` (it defaults to off). Npgsql has its own
+  `ActivitySource`, so it's one `AddSource("Npgsql")`. StackExchange.Redis makes no spans at all, so
+  Redis calls get Client spans of ours, with `db.system.name` and `server.address` so the map draws Redis
+  as a box. `watch-cosmos` deliberately leaves Cosmos tracing off: the change feed polls every few
+  seconds and each poll would be a trace of its own.
+- **No Ask text in telemetry.** Spans carry the Ask's *length*, never its text: telemetry is a separate
+  store with its own retention and readers. The Providers' Information log lines quote the Ask, so
+  `MeepleLedger.Storage` logs only go to Application Insights from Warning up. The Tonight page's error
+  log still includes the Ask, on purpose: an error you can't reproduce is worth less than one you can.
+- **Sampling.** The distro's default is *not* "everything": it's a rate limit of 5 traces a second. The
+  web app clears that and uses `AzureMonitor:SamplingRatio` (1.0 in `appsettings.json`, every trace)
+  while you look for one particular Ask. The worker, change feed and Function follow the root's decision
+  (the sampled flag in `traceparent`). Lowering the ratio therefore drops whole traces, never half of
+  one: the price is that a rare, slow Ask may simply not be there.
+
+**Comparing the Providers:** run the same Ask and Table on each Provider (`set-provider.ps1`) and compare
+the `Ask` spans in Application Insights (Performance, or Transaction search on `Ask`; the attribute
+`meepleledger.provider` tells them apart). Record the results in the A-31 ticket.
+
+**Cost:** Application Insights bills per GB ingested (the first 5 GB a month per billing account are
+free). An Ask is a handful of spans.
+
+## KQL: questions about the running system (A-32)
+
+```
+pwsh infra/monitor/save-queries.ps1                        # every infra/monitor/queries/*.kql -> saved search in meepleledger-logs
+pwsh infra/monitor/run-query.ps1 [name]                    # run one query file here and print the rows (no name: list them)
+pwsh infra/monitor/provision-alert.ps1 [-Email <address>]  # log search alert: dead-lettered embed requests, last 15 minutes
+```
+
+The queries read the spans A-31 sends. One file per question in `infra/monitor/queries/`, saved to the
+workspace (category `MeepleLedger`) so none of them lives only in a portal scratch tab:
+
+| File | Question |
+|---|---|
+| `retrieval-latency-by-provider` | p50/p95/p99 of `Query the Search Index`, split by Provider |
+| `cache-hit-rate-hourly` | Recommendation cache hits, misses and skips per hour, and the hit rate |
+| `failed-dependencies` | failed outside calls, grouped by target, type and result code |
+| `embed-request-to-function` | a `join`: each `Queue embed request` and the `Embed request` execution it triggered |
+| `zero-recommendation-asks` | Asks that returned nothing, and the Tables that caused them |
+| `ask-latency-timechart` | p95 of the `Ask` span per Provider, `render timechart` |
+| `dead-letters-by-reason` | what is dead-lettering, from which consumer, and why |
+
+- **Workspace table names.** `meepleledger-func-insights` is workspace-based, and the queries are saved
+  to the workspace, so they use `AppRequests`, `AppDependencies` and `Properties`. The classic names
+  (`requests`, `dependencies`, `customDimensions`) only work in the Application Insights resource's own
+  Logs blade; in the workspace they return nothing, with no error.
+- **Where the spans land.** Server and Consumer spans (`Embed request`) are in `AppRequests`. Internal
+  spans (`Ask`, `Query the Search Index`, `Rank`) and Client/Producer spans (`Queue embed request`, the
+  Redis spans) are in `AppDependencies`; Internal ones have `DependencyType == "InProc"`.
+- **Attributes are text in `Properties`.** `tostring(Properties["meepleledger.provider"])` before
+  grouping, `toint(...)` before comparing numbers. Bools are compared after `tolower(...)`.
+- **Provider case.** The `Ask` span has the setting as typed (`Cosmos`), the retrieval span lower case
+  (`cosmos`). Filter with `=~`, which ignores case; `==` doesn't.
+- **The join.** An Ask never triggers a Function: answering one only reads. The trace that does cross into
+  a Function is change feed -> Service Bus -> Function, so the join is there: the consumer span's
+  `ParentId` is the producer span's `Id`, in the same `OperationId`.
+- **Dead letters.** A consumer that dead-letters a message itself tags its span `meepleledger.outcome`
+  `dead-lettered` and `meepleledger.outcome.reason`. A message Service Bus dead-letters after the 5th
+  delivery (`MaxDeliveryCountExceeded`) is never seen as such by the consumer, so the queries count an
+  `abandoned` span with `meepleledger.delivery_count` 5 as one.
+- **The alert** (`meepleledger-dead-letters`) runs `infra/monitor/alerts/dead-lettered-messages.kql`
+  every 15 minutes over the last 15 and fires on any row. It is a log alert, not one on the Service Bus
+  `DeadletteredMessages` metric: that metric counts what is *sitting* in the dead-letter queue, so it
+  stays up until someone purges it. Without `-Email` there is no action group and the alert only shows
+  in Monitor > Alerts. A trace that was sampled away (or tracing off) is invisible to it.
+
+**Cost:** saved searches and queries are free. The alert rule bills per month by how often it runs
+(15 minutes is the cheapest step); deleting `rg-meepleledger` removes it.

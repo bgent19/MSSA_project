@@ -65,6 +65,12 @@ $settings = [ordered]@{
     }
 }
 
+# A-31: traces to Application Insights, when infra/monitor/connect-appinsights.ps1 has set the secret.
+# The Functions host and Program.cs both read this exact name; in Azure the function app already has it.
+if ($secrets.ContainsKey("AzureMonitor:ConnectionString")) {
+    $settings.Values["APPLICATIONINSIGHTS_CONNECTION_STRING"] = $secrets["AzureMonitor:ConnectionString"]
+}
+
 $settings | ConvertTo-Json -Depth 3 | Set-Content -Path $outputPath -Encoding utf8
 
 Write-Host "Wrote $outputPath"

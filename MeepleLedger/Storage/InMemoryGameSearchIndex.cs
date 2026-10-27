@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using MeepleLedger.Domain;
 
@@ -44,16 +45,27 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
             throw new ArgumentOutOfRangeException(nameof(maxResults), "Ask for at least one Recommendation.");
         }
 
-        // Step 1: apply the Table first, so ranking only ever sees Games that are allowed.
-        List<Game> candidates = FindGamesTheTableAllows(table);
-
-        // Step 2: score every candidate against the words of the Ask.
-        List<string> askWords = AskWords.FindUsefulWords(ask.Text);
+        // Steps 1 and 2 are the "query" of this Provider, and step 3 onwards its ranking, so they
+        // get the same two spans as the cloud Providers (A-31) and their traces compare side by side.
         List<ScoredGame> scoredGames = [];
-        foreach (Game game in candidates)
+        using (Activity? querySpan = SearchTelemetry.Source.StartActivity("Query the Search Index"))
         {
-            scoredGames.Add(ScoreGame(game, askWords));
+            querySpan?.SetTag(SearchTelemetry.ProviderTag, "inmemory");
+
+            // Step 1: apply the Table first, so ranking only ever sees Games that are allowed.
+            List<Game> candidates = FindGamesTheTableAllows(table);
+
+            // Step 2: score every candidate against the words of the Ask.
+            List<string> askWords = AskWords.FindUsefulWords(ask.Text);
+            foreach (Game game in candidates)
+            {
+                scoredGames.Add(ScoreGame(game, askWords));
+            }
+
+            querySpan?.SetTag(SearchTelemetry.ResultCountTag, scoredGames.Count);
         }
+
+        using Activity? rankSpan = SearchTelemetry.Source.StartActivity("Rank");
 
         // Step 3: best score first; ties go to the Name that sorts first.
         scoredGames.Sort(CompareScoredGames);
@@ -67,6 +79,7 @@ public class InMemoryGameSearchIndex : IGameSearchIndex
             recommendations.Add(new Recommendation(scored.Game, i + 1, reason));
         }
 
+        rankSpan?.SetTag(SearchTelemetry.ResultCountTag, recommendations.Count);
         return Task.FromResult<IReadOnlyList<Recommendation>>(recommendations);
     }
 
