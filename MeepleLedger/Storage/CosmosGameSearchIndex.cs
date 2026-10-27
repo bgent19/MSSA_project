@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using MeepleLedger.Domain;
 using Microsoft.Azure.Cosmos;
@@ -79,8 +80,20 @@ public class CosmosGameSearchIndex : IGameSearchIndex
 
         float[] askVector = await _embedder.EmbedAsync(ask.Text);
 
-        QueryDefinition query = BuildQuery(askVector, table, ownedNames, maxResults);
-        List<SearchResult> results = await RunQueryAsync(query, ask);
+        // A-31: the Cosmos SDK's own span for the query sits under this one (Program.cs turns the
+        // SDK's tracing on).
+        List<SearchResult> results;
+        using (Activity? querySpan = SearchTelemetry.Source.StartActivity("Query the Search Index"))
+        {
+            querySpan?.SetTag(SearchTelemetry.ProviderTag, "cosmos");
+
+            QueryDefinition query = BuildQuery(askVector, table, ownedNames, maxResults);
+            results = await RunQueryAsync(query, ask, querySpan);
+
+            querySpan?.SetTag(SearchTelemetry.ResultCountTag, results.Count);
+        }
+
+        using Activity? rankSpan = SearchTelemetry.Source.StartActivity("Rank");
 
         PutEqualScoresInNameOrder(results);
 
@@ -94,6 +107,7 @@ public class CosmosGameSearchIndex : IGameSearchIndex
             recommendations.Add(new Recommendation(game, recommendations.Count + 1, reason));
         }
 
+        rankSpan?.SetTag(SearchTelemetry.ResultCountTag, recommendations.Count);
         return recommendations;
     }
 
@@ -132,7 +146,7 @@ public class CosmosGameSearchIndex : IGameSearchIndex
     }
 
     // Runs the query, reading every page, and logs the request charge so there is an RU baseline (A-09).
-    private async Task<List<SearchResult>> RunQueryAsync(QueryDefinition query, Ask ask)
+    private async Task<List<SearchResult>> RunQueryAsync(QueryDefinition query, Ask ask, Activity? querySpan)
     {
         List<SearchResult> results = [];
         double requestCharge = 0;
@@ -152,6 +166,9 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         _logger.LogInformation(
             "Cosmos vector search for \"{Ask}\" returned {Count} Games for {RequestCharge} RU",
             ask.Text, results.Count, requestCharge);
+
+        // The charge on the span too, so a trace shows what the Ask cost, not only how long it took
+        querySpan?.SetTag("meepleledger.cosmos.request_charge", requestCharge);
 
         return results;
     }

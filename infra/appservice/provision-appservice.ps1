@@ -5,14 +5,19 @@
 #   - meepleledger-web:  a Web App for Containers on that plan, running meepleledger:<tag> from
 #                        meepleledgeracr. https://meepleledger-web.azurewebsites.net
 # then gives the app a system-assigned managed identity, grants it AcrPull on the registry only,
-# tells the app to pull with that identity, grants it Key Vault Secrets User on meepleledger-kv (A-29),
-# and writes the app settings. Safe to run again: anything that exists is left alone, and the settings
-# and image are re-applied.
+# tells the app to pull with that identity, grants it Key Vault Secrets User on meepleledger-kv (A-29)
+# and App Configuration Data Reader on meepleledger-appconfig (A-30), and writes the app settings.
+# Safe to run again: anything that exists is left alone, and the settings and image are re-applied.
 #
-# No secret is an app setting (A-29). The app setting KeyVault__Uri points the app at the vault, and
-# the app reads every key from it as its managed identity, through DefaultAzureCredential. A secret
-# app setting left over from before A-29 is deleted. Run pwsh infra/keyvault/provision-keyvault.ps1
-# first: it makes the vault and puts the secrets in it.
+# Since A-30 the app settings say only WHERE the settings are: AppConfig__Endpoint and
+# AppConfig__Label=azure. Everything else the app reads (the Provider, the endpoints, and the secrets
+# through Key Vault references) is in App Configuration, read as the app's managed identity. The
+# Provider is switched there, with pwsh infra/appconfig/set-provider.ps1, and takes effect without a
+# restart. The Key Vault references are resolved by THIS app's identity, which is why it still needs
+# Key Vault Secrets User. App settings from before A-30 (SearchIndex__Provider, KeyVault__Uri, the
+# endpoints) and secret ones from before A-29 are deleted. Run, in this order, first:
+#   pwsh infra/keyvault/provision-keyvault.ps1      the vault and its secrets
+#   pwsh infra/appconfig/provision-appconfig.ps1    the store, its settings and references
 #
 # The image is pulled by IDENTITY, not with the registry's admin user name and password (that account
 # stays off, A-24). The pull needs two things:
@@ -20,9 +25,9 @@
 #   - acrUseManagedIdentityCreds = true in the app's site config. Without it App Service tries an
 #     anonymous pull, which a private registry refuses.
 #
-# Every setting is an App Service app setting. App Service hands app settings to the container as
-# environment variables, and .NET reads "__" in a variable name as ":". So SearchIndex:Provider is the
-# app setting SearchIndex__Provider. A name with a colon in it is not an error: it is just never read.
+# App Service hands app settings to the container as environment variables, and .NET reads "__" in a
+# variable name as ":". So AppConfig:Endpoint is the app setting AppConfig__Endpoint. A name with a
+# colon in it is not an error: it is just never read.
 #
 # The image is deployed by its VERSION tag, never :latest (A-24): with -Tag, or by default the newest
 # tag in the registry that is not "latest". Deploying an older tag is a rollback.
@@ -33,11 +38,10 @@
 #   az appservice plan delete --name meepleledger-plan --resource-group rg-meepleledger --yes
 # A-33 tears them down with the resource group.
 #
-# Run from the repo root:  pwsh infra/appservice/provision-appservice.ps1 [-Tag <version>] [-Provider InMemory|Cosmos|Postgres|Redis]
+# Run from the repo root:  pwsh infra/appservice/provision-appservice.ps1 [-Tag <version>]
 
 param(
-    [string]$Tag = "",
-    [string]$Provider = "InMemory"
+    [string]$Tag = ""
 )
 
 $resourceGroup = "rg-meepleledger"
@@ -50,8 +54,8 @@ $registryName = "meepleledgeracr"         # from provision-acr.ps1
 $imageName = "meepleledger"
 
 $vaultName = "meepleledger-kv"            # from provision-keyvault.ps1 (A-29)
-
-$userSecretsId = "93de1646-b3dc-4c1f-9bc8-3ebc34f364f3"   # the Seeder's, shared by every project
+$storeName = "meepleledger-appconfig"     # from provision-appconfig.ps1 (A-30)
+$appConfigLabel = "azure"                 # the label this app reads; this machine reads "local"
 
 # Stop on the first failed az command instead of carrying on with half a setup.
 function Test-LastCommand([string]$step) {
@@ -61,40 +65,13 @@ function Test-LastCommand([string]$step) {
     }
 }
 
-if (@("InMemory", "Cosmos", "Postgres", "Redis") -notcontains $Provider) {
-    Write-Host "FAILED: -Provider must be InMemory, Cosmos, Postgres or Redis, not '$Provider'." -ForegroundColor Red
-    exit 1
-}
-
-# 0. Read the user secrets, for the settings that are NOT secret (endpoints and names). The keys
-#    themselves are in Key Vault and are not read here.
-$secretsPath = Join-Path $env:APPDATA "Microsoft/UserSecrets/$userSecretsId/secrets.json"
-if (-not (Test-Path $secretsPath)) {
-    Write-Host "FAILED: no user secrets at $secretsPath. Run the provisioning scripts first." -ForegroundColor Red
-    exit 1
-}
-$secrets = Get-Content $secretsPath -Raw | ConvertFrom-Json -AsHashtable
-$needed = @(
-    "Cosmos:Endpoint",
-    "AzureOpenAI:Endpoint", "AzureOpenAI:EmbeddingDeployment"
-)
-$missing = @()
-foreach ($name in $needed) {
-    if (-not $secrets.ContainsKey($name) -or [string]::IsNullOrWhiteSpace($secrets[$name])) {
-        $missing += $name
-    }
-}
-if ($missing.Count -gt 0) {
-    Write-Host "FAILED: missing user secrets: $($missing -join ', ')" -ForegroundColor Red
-    Write-Host "(provision-cosmos.ps1 and provision-openai.ps1 set them)"
-    exit 1
-}
-
-# The vault the app reads its secrets from.
+# 0. The vault the Key Vault references point at, and the store that holds them.
 $vaultId = az keyvault show --name $vaultName --resource-group $resourceGroup --query id -o tsv
 Test-LastCommand "find Key Vault $vaultName (run pwsh infra/keyvault/provision-keyvault.ps1 first)"
-$vaultUri = az keyvault show --name $vaultName --resource-group $resourceGroup --query properties.vaultUri -o tsv
-Test-LastCommand "read the vault URI"
+$storeId = az appconfig show --name $storeName --resource-group $resourceGroup --query id -o tsv
+Test-LastCommand "find App Configuration store $storeName (run pwsh infra/appconfig/provision-appconfig.ps1 first)"
+$storeEndpoint = az appconfig show --name $storeName --resource-group $resourceGroup --query endpoint -o tsv
+Test-LastCommand "read the store endpoint"
 
 # 1. The registry, and the image version to run.
 $registryId = az acr show --name $registryName --resource-group $resourceGroup --query id -o tsv
@@ -198,6 +175,24 @@ else {
     Test-LastCommand "grant $keyVaultRole to $appName"
 }
 
+# App Configuration Data Reader on the one store: read key-values and feature flags, nothing else. Like
+# the others, a new assignment can take minutes; until then the app stops at startup with a 403.
+$appConfigRole = "App Configuration Data Reader"
+$existingStoreRole = az role assignment list --role $appConfigRole --scope $storeId --query "[?principalId=='$principalId'].id" -o tsv
+if ($existingStoreRole) {
+    Write-Host "$appName already has $appConfigRole on $storeName."
+}
+else {
+    Write-Host "Granting $appConfigRole on $storeName to $appName..."
+    az role assignment create `
+        --assignee-object-id $principalId `
+        --assignee-principal-type ServicePrincipal `
+        --role $appConfigRole `
+        --scope $storeId `
+        --output none
+    Test-LastCommand "grant $appConfigRole to $appName"
+}
+
 # 5. Site config:
 #    - acrUseManagedIdentityCreds: pull with the identity above
 #    - Always On: off by default on the lower tiers, and then the app is unloaded after 20 idle
@@ -225,31 +220,28 @@ Test-LastCommand "set ARR affinity and HTTPS only"
 #    WEBSITES_PORT: App Service sends traffic to port 80 unless told otherwise, and the .NET images
 #    listen on 8080. Without it the app "deploys" fine and every request times out.
 #
-#    KeyVault__Uri: where the keys are (Cosmos:Key, AzureOpenAI:Key, the Postgres and Redis connection
-#    strings, EventGrid:TopicKey). None of them is an app setting any more.
+#    AppConfig__Endpoint and AppConfig__Label: where every other setting is (A-30). The Provider, the
+#    endpoints, and the keys (through Key Vault references) are all in the store.
 $settings = [ordered]@{
     "WEBSITES_PORT" = "8080"
-    "KeyVault__Uri" = $vaultUri
-    "SearchIndex__Provider" = $Provider
-    "Cosmos__Endpoint" = $secrets["Cosmos:Endpoint"]
-    "AzureOpenAI__Endpoint" = $secrets["AzureOpenAI:Endpoint"]
-    "AzureOpenAI__EmbeddingDeployment" = $secrets["AzureOpenAI:EmbeddingDeployment"]
+    "AppConfig__Endpoint" = $storeEndpoint
+    "AppConfig__Label" = $appConfigLabel
     "RecommendationCache__Enabled" = "false"
     "EventGrid__Enabled" = "false"
 }
-# Cosmos:Database and Cosmos:Container, the Postgres pool settings, the cache TTL and the Key Vault
-# reload interval are not secrets: they are in appsettings.json, which is inside the image. An app
-# setting would override them.
-if ($secrets.ContainsKey("EventGrid:TopicEndpoint") -and -not [string]::IsNullOrWhiteSpace($secrets["EventGrid:TopicEndpoint"])) {
-    $settings["EventGrid__TopicEndpoint"] = $secrets["EventGrid:TopicEndpoint"]
-}
-else {
-    Write-Host "  (no EventGrid:TopicEndpoint user secret, so no EventGrid__TopicEndpoint app setting)"
-}
+# Cosmos:Database and Cosmos:Container, the Postgres pool settings, the cache TTL, the refresh and
+# reload intervals are not secrets and do not change per deployment: they are in appsettings.json,
+# which is inside the image. An app setting would override them.
 
-# The secret app settings from before A-29. Each would be read as a setting (though the Key Vault
-# value wins over it), and would still be a key sitting in the portal, so they are deleted.
-$oldSecretSettings = @("Cosmos__Key", "AzureOpenAI__Key", "Postgres__ConnectionString", "Redis__ConnectionString", "EventGrid__TopicKey")
+# App settings from before. The secret ones (A-29) would still be keys sitting in the portal. The rest
+# moved to App Configuration (A-30): an app setting is an environment variable, which App
+# Configuration would win over anyway, but leaving SearchIndex__Provider here would make the portal
+# say one Provider while the app runs another.
+$oldSecretSettings = @(
+    "Cosmos__Key", "AzureOpenAI__Key", "Postgres__ConnectionString", "Redis__ConnectionString", "EventGrid__TopicKey",
+    "SearchIndex__Provider", "KeyVault__Uri", "Cosmos__Endpoint", "AzureOpenAI__Endpoint",
+    "AzureOpenAI__EmbeddingDeployment", "EventGrid__TopicEndpoint"
+)
 
 Write-Host "App settings on $appName..."
 $list = @()
@@ -270,7 +262,7 @@ $currentNames = az webapp config appsettings list --name $appName --resource-gro
 Test-LastCommand "list the app settings of $appName"
 foreach ($oldName in $oldSecretSettings) {
     if ($currentNames -contains $oldName) {
-        Write-Host "  Deleting the old secret app setting $oldName (it is in Key Vault now)..."
+        Write-Host "  Deleting the old app setting $oldName (it is in App Configuration or Key Vault now)..."
         az webapp config appsettings delete --name $appName --resource-group $resourceGroup --setting-names $oldName --output none
         Test-LastCommand "delete app setting $oldName"
     }
@@ -332,10 +324,10 @@ else {
 }
 Write-Host "  Plan:      $planName (Linux, $sku) in $location"
 Write-Host "  App:       $appName, image $image"
-Write-Host "  Identity:  $principalId, AcrPull on $registryName, $keyVaultRole on $vaultName"
-Write-Host "  Secrets:   from $vaultUri (no secret app settings)"
-Write-Host "  Provider:  $Provider"
+Write-Host "  Identity:  $principalId, AcrPull on $registryName, $keyVaultRole on $vaultName, $appConfigRole on $storeName"
+Write-Host "  Settings:  from $storeEndpoint, label $appConfigLabel (secrets through its Key Vault references)"
 Write-Host ""
 Write-Host "Next:"
-Write-Host "  pwsh infra/appservice/set-provider.ps1 Cosmos      flip the Search Index Provider (restarts the app)"
+Write-Host "  pwsh infra/appconfig/set-provider.ps1 Cosmos       flip the Search Index Provider (no restart)"
+Write-Host "  pwsh infra/appconfig/set-tonight.ps1 off           hide the Tonight screen (no restart)"
 Write-Host "  az webapp log tail --name $appName --resource-group $resourceGroup      stream the container log"

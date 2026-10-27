@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using MeepleLedger.Domain;
@@ -106,7 +107,17 @@ public class PostgresGameSearchIndex : IGameSearchIndex
 
         float[] askVector = await _embedder.EmbedAsync(ask.Text);
 
-        List<SearchResult> results = await SearchAsync(new Vector(askVector), table, ownedNames, maxResults, ask);
+        // A-31: Npgsql's own spans (one per command: the SET LOCAL, the query, the exact
+        // scan when it runs) sit under this one. Program.cs subscribes to the "Npgsql" source.
+        List<SearchResult> results;
+        using (Activity? querySpan = SearchTelemetry.Source.StartActivity("Query the Search Index"))
+        {
+            querySpan?.SetTag(SearchTelemetry.ProviderTag, "postgres");
+            results = await SearchAsync(new Vector(askVector), table, ownedNames, maxResults, ask);
+            querySpan?.SetTag(SearchTelemetry.ResultCountTag, results.Count);
+        }
+
+        using Activity? rankSpan = SearchTelemetry.Source.StartActivity("Rank");
 
         PutEqualDistancesInNameOrder(results);
 
@@ -120,6 +131,7 @@ public class PostgresGameSearchIndex : IGameSearchIndex
             recommendations.Add(new Recommendation(game, recommendations.Count + 1, reason));
         }
 
+        rankSpan?.SetTag(SearchTelemetry.ResultCountTag, recommendations.Count);
         return recommendations;
     }
 

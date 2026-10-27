@@ -47,4 +47,18 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
   </ItemGroup>
 
+  <!-- A-30: settings, Key Vault references and feature flags from Azure App Configuration. The
+       AspNetCore package brings the refresh middleware (UseAzureAppConfiguration) on top of the
+       configuration provider; FeatureManagement reads the flags (IFeatureManager). -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.AppConfiguration.AspNetCore" Version="8.6.1" />
+    <PackageReference Include="Microsoft.FeatureManagement" Version="4.8.0" />
+  </ItemGroup>
+
+  <!-- A-31: OpenTelemetry with the Azure Monitor exporter. The distro turns on tracing for ASP.NET
+       Core, HttpClient and the Azure SDKs (Cosmos included) and sends it to Application Insights. -->
+  <ItemGroup>
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.6.0" />
+  </ItemGroup>
+
 </Project>

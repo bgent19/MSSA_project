@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -6,8 +7,13 @@ using System.Text.Json;
 using Azure.Extensions.AspNetCore.Configuration.Secrets;
 using Azure.Identity;
 using Azure.Messaging.ServiceBus;
+using Azure.Monitor.OpenTelemetry.Exporter;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration.AzureAppConfiguration;
+using OpenTelemetry;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 // MeepleLedger.Worker (A-19): takes embed requests off the Service Bus queue "embed-requests",
 // embeds the Game's current text with Azure OpenAI, and writes the vector (and the hash of the text
@@ -31,19 +37,89 @@ using Microsoft.Extensions.Configuration;
 // come from Key Vault instead, read as the managed identity (on this machine, your Azure CLI login)
 // through DefaultAzureCredential. Key Vault is added last, so it wins over both. Secret names use
 // "--" for the colon: AzureOpenAI--Key is AzureOpenAI:Key.
+//
+// With AppConfig:Endpoint set (A-30; AppConfig__Endpoint in Container Apps) the settings come from
+// Azure App Configuration, and the secrets through its Key Vault references, read as the same
+// identity. The worker reads the keys with no label and those with AppConfig:Label ("local" unless
+// set). It checks the sentinel key before a Game is embedded, at most every
+// AppConfig:RefreshIntervalSeconds (300 unless set), so an idle worker makes no requests at all.
+//
+// With AzureMonitor:ConnectionString set (A-31) every message handled is a span in Application
+// Insights, joined to the trace of whoever queued it through the message's traceparent property.
 
 IConfigurationBuilder configBuilder = new ConfigurationBuilder()
     .AddUserSecrets<Program>()
     .AddEnvironmentVariables();
-IConfiguration config = configBuilder.Build();
 
-string? keyVaultUri = config["KeyVault:Uri"];
+// Only to read where the rest of the settings come from. The real configuration is built once, below,
+// with every source in it: building it twice would make two App Configuration providers.
+IConfiguration startConfig = configBuilder.Build();
+
+IConfigurationRefresher? appConfigRefresher = null;
+string? appConfigEndpoint = startConfig["AppConfig:Endpoint"];
+if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
+{
+    string appConfigLabel = startConfig["AppConfig:Label"] ?? "local";
+
+    int refreshSeconds = 300;
+    string? refreshSetting = startConfig["AppConfig:RefreshIntervalSeconds"];
+    if (!string.IsNullOrWhiteSpace(refreshSetting))
+    {
+        if (!int.TryParse(refreshSetting, out refreshSeconds) || refreshSeconds < 1)
+        {
+            Console.WriteLine($"AppConfig:RefreshIntervalSeconds must be a whole number of 1 or more, not '{refreshSetting}'.");
+            return 1;
+        }
+    }
+
+    int secretRefreshMinutes = 5;
+    string? secretRefreshSetting = startConfig["KeyVault:ReloadIntervalMinutes"];
+    if (!string.IsNullOrWhiteSpace(secretRefreshSetting))
+    {
+        if (!int.TryParse(secretRefreshSetting, out secretRefreshMinutes) || secretRefreshMinutes < 1)
+        {
+            Console.WriteLine($"KeyVault:ReloadIntervalMinutes must be a whole number of 1 or more, not '{secretRefreshSetting}'.");
+            return 1;
+        }
+    }
+
+    // With two user-assigned identities on the app, AZURE_CLIENT_ID picks the worker's (see below).
+    DefaultAzureCredential credential = new DefaultAzureCredential();
+
+    configBuilder.AddAzureAppConfiguration(options =>
+    {
+        options.Connect(new Uri(appConfigEndpoint), credential);
+
+        // No label first (shared), then this worker's label, which wins
+        options.Select(KeyFilter.Any, LabelFilter.Null);
+        options.Select(KeyFilter.Any, appConfigLabel);
+
+        // The Key Vault references are resolved by THIS identity: it needs Key Vault Secrets User
+        options.ConfigureKeyVault(keyVault =>
+        {
+            keyVault.SetCredential(credential);
+            keyVault.SetSecretRefreshInterval(TimeSpan.FromMinutes(secretRefreshMinutes));
+        });
+
+        // The same sentinel as the web app (AppConfigKeys.Sentinel there; keep the name in step)
+        options.ConfigureRefresh(refresh =>
+        {
+            refresh.Register("MeepleLedger:Sentinel", refreshAll: true);
+            refresh.SetRefreshInterval(TimeSpan.FromSeconds(refreshSeconds));
+        });
+
+        appConfigRefresher = options.GetRefresher();
+    });
+    Console.WriteLine($"Settings come from App Configuration {appConfigEndpoint}, label {appConfigLabel}, sentinel checked at most every {refreshSeconds} seconds.");
+}
+
+string? keyVaultUri = startConfig["KeyVault:Uri"];
 if (!string.IsNullOrWhiteSpace(keyVaultUri))
 {
     // The provider reads every secret once, then keeps them. Without a reload interval it never
     // reads them again, and a rotated key would only reach the worker when it restarted.
     int reloadMinutes = 5;
-    string? reloadSetting = config["KeyVault:ReloadIntervalMinutes"];
+    string? reloadSetting = startConfig["KeyVault:ReloadIntervalMinutes"];
     if (!string.IsNullOrWhiteSpace(reloadSetting))
     {
         if (!int.TryParse(reloadSetting, out reloadMinutes) || reloadMinutes < 1)
@@ -62,9 +138,14 @@ if (!string.IsNullOrWhiteSpace(keyVaultUri))
     // DefaultAzureCredential cannot guess which one to use: the AZURE_CLIENT_ID environment variable
     // names it.
     configBuilder.AddAzureKeyVault(new Uri(keyVaultUri), new DefaultAzureCredential(), keyVaultOptions);
-    config = configBuilder.Build();
     Console.WriteLine($"Secrets come from Key Vault {keyVaultUri}, reloaded every {reloadMinutes} minutes.");
 }
+
+// Reads App Configuration and Key Vault now, if they are on. No role on either fails here with a 403.
+IConfiguration config = configBuilder.Build();
+
+// Disposed when the program ends, which sends any spans still waiting. Null when tracing is off.
+using TracerProvider? tracerProvider = StartTracing(config);
 
 string? busConnectionString = config["ServiceBus:ConnectionString"];
 if (string.IsNullOrWhiteSpace(busConnectionString))
@@ -148,7 +229,7 @@ if (command != "")
     return 1;
 }
 
-return await RunWorker(config, busClient);
+return await RunWorker(config, busClient, appConfigRefresher);
 
 
 static void PrintUsage()
@@ -169,7 +250,7 @@ static void PrintUsage()
 //                  count) Service Bus moves it to the dead-letter queue: MaxDeliveryCountExceeded.
 //   - Dead-letter: the message itself is wrong (not JSON, an unknown schema version). Retrying
 //                  cannot fix that, so it goes to the dead-letter queue now, with a reason.
-static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClient)
+static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClient, IConfigurationRefresher? appConfigRefresher)
 {
     string? openAiEndpoint = config["AzureOpenAI:Endpoint"];
     string? openAiKey = config["AzureOpenAI:Key"];
@@ -209,6 +290,12 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         SerializerOptions = new CosmosSerializationOptions
         {
             PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+
+        // The SDK's own spans (the read and the patch) are off unless asked for (A-31)
+        CosmosClientTelemetryOptions = new CosmosClientTelemetryOptions
+        {
+            DisableDistributedTracing = false,
         },
     };
 
@@ -277,6 +364,10 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         ServiceBusReceivedMessage message = args.Message;
         string label = $"[{DateTime.Now:HH:mm:ss}]{revisionLabel} #{message.SequenceNumber} (delivery {message.DeliveryCount})";
 
+        // One span per delivery, in the trace of whoever queued the message (A-31). Everything below,
+        // the Cosmos read, the embeddings call and the patch, hangs under it.
+        using Activity? span = WorkerTelemetry.StartConsumerSpan("Embed request", message);
+
         // 1. Read the body. A body that cannot be read now will not be readable on the 5th try
         //    either, so dead-letter it straight away with a reason. Throwing would only abandon
         //    it, and it would come back 4 more times first.
@@ -300,6 +391,7 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
         {
             await args.DeadLetterMessageAsync(message, "BadPayload", badPayload, args.CancellationToken);
             Console.WriteLine($"{label} dead-lettered: BadPayload. {badPayload}");
+            WorkerTelemetry.SetOutcome(span, "dead-lettered", "BadPayload");
             return;
         }
 
@@ -309,6 +401,7 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             string description = $"This worker reads schema version {EmbedRequest.CurrentSchemaVersion}; the message is version {request.SchemaVersion} (0 means the field is missing).";
             await args.DeadLetterMessageAsync(message, "UnsupportedSchemaVersion", description, args.CancellationToken);
             Console.WriteLine($"{label} dead-lettered: UnsupportedSchemaVersion. {description}");
+            WorkerTelemetry.SetOutcome(span, "dead-lettered", "UnsupportedSchemaVersion");
             return;
         }
 
@@ -317,6 +410,7 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             string description = "The request has no gameId.";
             await args.DeadLetterMessageAsync(message, "BadPayload", description, args.CancellationToken);
             Console.WriteLine($"{label} dead-lettered: BadPayload. {description}");
+            WorkerTelemetry.SetOutcome(span, "dead-lettered", "BadPayload");
             return;
         }
 
@@ -327,6 +421,8 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             force = forceFlag;
         }
 
+        span?.SetTag("meepleledger.game", request.GameId);
+
         // 3. Do the work. Anything that fails from here on might work next time: a throttled or
         //    failed embeddings call, Cosmos being busy, the Game edited between our read and our
         //    write. So it is abandoned, and Service Bus dead-letters it after the 5th delivery.
@@ -336,11 +432,14 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             string outcome = await EmbedGameAsync(request.GameId, force, args.CancellationToken);
             await args.CompleteMessageAsync(message, args.CancellationToken);
             Console.WriteLine($"{label} '{request.GameId}': {outcome}. Completed.");
+            WorkerTelemetry.SetOutcome(span, "completed", null);
         }
         catch (Exception ex)
         {
             string error = ShortError(ex);
             Console.WriteLine($"{label} '{request.GameId}': failed: {error}");
+            span?.AddException(ex);
+            WorkerTelemetry.SetOutcome(span, "abandoned", error);
 
             // Abandon puts the message straight back, so without a pause a short outage would use
             // up all 5 deliveries in a second. The lock is still held (and renewed) while we wait.
@@ -391,6 +490,13 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             return "vector already up to date, nothing to do";
         }
 
+        // With App Configuration, check the sentinel first (A-30). It only calls the store once the
+        // refresh interval has passed, and never throws: a failed refresh keeps the settings it has.
+        if (appConfigRefresher != null)
+        {
+            await appConfigRefresher.TryRefreshAsync(cancellationToken);
+        }
+
         // Read the key now, not once at startup. With Key Vault the configuration reloads every few
         // minutes, so after a rotation (A-29) the next Game is embedded with the new key.
         string? key = config["AzureOpenAI:Key"];
@@ -404,7 +510,11 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             lastOpenAiKey = key;
         }
 
-        float[] vector = await EmbedTextAsync(http, embeddingsUrl, key, text, cancellationToken);
+        float[] vector;
+        using (Activity? embedSpan = WorkerTelemetry.Source.StartActivity("Embed the Game"))
+        {
+            vector = await EmbedTextAsync(http, embeddingsUrl, key, text, cancellationToken);
+        }
 
         // Write only the two fields that change, and the hash WITH the vector: the change feed sees
         // this write too, and only the matching hash stops it queueing another embed (A-10).
@@ -421,8 +531,13 @@ static async Task<int> RunWorker(IConfiguration config, ServiceBusClient busClie
             EnableContentResponseOnWrite = false,
         };
 
-        ItemResponse<CosmosGameDocument> written = await games.PatchItemAsync<CosmosGameDocument>(
-            gameId, new PartitionKey(gameId), operations, patchOptions, cancellationToken);
+        // The end of the cross-process trace: change feed -> Service Bus -> here -> this write
+        ItemResponse<CosmosGameDocument> written;
+        using (Activity? writeSpan = WorkerTelemetry.Source.StartActivity("Write the vector back"))
+        {
+            written = await games.PatchItemAsync<CosmosGameDocument>(
+                gameId, new PartitionKey(gameId), operations, patchOptions, cancellationToken);
+        }
 
         double charge = read.RequestCharge + written.RequestCharge;
         double? similarity = CosineSimilarity(game.Embedding, vector);
@@ -511,10 +626,18 @@ static async Task<int> SendRequest(ServiceBusClient busClient, string gameId)
         DetectedAtUtc = DateTime.UtcNow,
     };
 
+    // A trace of its own, so a hand-queued request can be followed into the worker or the Function
+    using Activity? span = WorkerTelemetry.Source.StartActivity("Queue embed request", ActivityKind.Producer);
+    span?.SetTag("meepleledger.game", gameId);
+
     await using ServiceBusSender sender = busClient.CreateSender(EmbedRequest.QueueName);
     await sender.SendMessageAsync(BuildMessage(JsonSerializer.Serialize(request, EmbedRequest.JsonOptions), request.SchemaVersion));
 
     Console.WriteLine($"Queued an embed request for '{gameId}'.");
+    if (span != null)
+    {
+        Console.WriteLine($"  trace id {span.TraceId} (search for it in Application Insights)");
+    }
     return 0;
 }
 
@@ -663,7 +786,44 @@ static ServiceBusMessage BuildMessage(string body, int schemaVersion)
     message.ContentType = "application/json";
     message.Subject = "EmbedRequest";
     message.ApplicationProperties["schemaVersion"] = schemaVersion;
+
+    // The trace context, so whoever handles the message joins the sender's trace (A-31). A message
+    // carries nothing of the kind unless it is put there. Activity.Id is already in the W3C
+    // traceparent format: 00-<trace id>-<span id>-<flags>. Nothing is added when tracing is off.
+    Activity? current = Activity.Current;
+    if (current != null)
+    {
+        message.ApplicationProperties["traceparent"] = current.Id;
+    }
+
     return message;
+}
+
+// Starts OpenTelemetry when AzureMonitor:ConnectionString is set (A-31), or returns null. The
+// service name is the worker's box on the Application Insights application map.
+static TracerProvider? StartTracing(IConfiguration config)
+{
+    string? connectionString = config["AzureMonitor:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        return null;
+    }
+
+    // The Azure SDKs (Service Bus, and Cosmos's spans) only make spans with this switch on
+    AppContext.SetSwitch("Azure.Experimental.EnableActivitySource", true);
+
+    string serviceName = "meepleledger-worker";
+    Console.WriteLine($"Traces go to Application Insights (service {serviceName}).");
+
+    // No sampler set: the default follows the parent's decision, so a trace the web app or the
+    // Seeder chose to keep is kept here too, and one they dropped is dropped.
+    return Sdk.CreateTracerProviderBuilder()
+        .ConfigureResource(resource => resource.AddService(serviceName))
+        .AddSource(WorkerTelemetry.SourceName)
+        .AddSource("Azure.*")
+        .AddHttpClientInstrumentation()
+        .AddAzureMonitorTraceExporter(options => options.ConnectionString = connectionString)
+        .Build();
 }
 
 // Counts the dead-letter queue by peeking: peek reads without locking or removing anything.
@@ -995,6 +1155,57 @@ static string ShortError(Exception ex)
         text = text.Substring(0, 300) + "...";
     }
     return text;
+}
+
+// The worker's spans (A-31). With tracing off nothing listens, StartActivity returns null, and
+// every "span?." call does nothing.
+static class WorkerTelemetry
+{
+    public const string SourceName = "MeepleLedger.Worker";
+
+    public static readonly ActivitySource Source = new ActivitySource(SourceName);
+
+    // A span for handling one message, whose PARENT is the span that sent it. The parent comes from
+    // the message's traceparent property (put there by BuildMessage or the Seeder), or Diagnostic-Id,
+    // the name the Service Bus SDK uses for the same value. Without either, the span starts a trace
+    // of its own.
+    public static Activity? StartConsumerSpan(string name, ServiceBusReceivedMessage message)
+    {
+        ActivityContext parent = default;
+        string[] propertyNames = { "traceparent", "Diagnostic-Id" };
+        foreach (string propertyName in propertyNames)
+        {
+            if (message.ApplicationProperties.TryGetValue(propertyName, out object? value)
+                && value is string text
+                && ActivityContext.TryParse(text, null, out ActivityContext parsed))
+            {
+                parent = parsed;
+                break;
+            }
+        }
+
+        Activity? span = Source.StartActivity(name, ActivityKind.Consumer, parent);
+        span?.SetTag("messaging.system", "servicebus");
+        span?.SetTag("messaging.destination.name", EmbedRequest.QueueName);
+        span?.SetTag("messaging.message.id", message.MessageId);
+        span?.SetTag("meepleledger.delivery_count", message.DeliveryCount);
+        return span;
+    }
+
+    // How the message ended: completed, abandoned or dead-lettered. Anything but completed is an error.
+    public static void SetOutcome(Activity? span, string outcome, string? reason)
+    {
+        if (span == null)
+        {
+            return;
+        }
+
+        span.SetTag("meepleledger.outcome", outcome);
+        if (outcome != "completed")
+        {
+            span.SetStatus(ActivityStatusCode.Error, reason);
+        }
+    }
 }
 
 // The intent to re-embed one Game (A-10). The same shape as EmbedRequest in the Seeder, which

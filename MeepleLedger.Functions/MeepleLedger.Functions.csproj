@@ -23,6 +23,15 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
+  <!-- A-31: OpenTelemetry in the worker process, exported to the same Application Insights as the
+       host (host.json has telemetryMode OpenTelemetry). Functions.Worker.OpenTelemetry carries the
+       host's trace context into this process, so the host's span and ours are one trace. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.OpenTelemetry" Version="1.2.0" />
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.Exporter" Version="1.10.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.20.1" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Update="host.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

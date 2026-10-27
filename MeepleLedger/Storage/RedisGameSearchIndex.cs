@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using MeepleLedger.Domain;
@@ -79,7 +80,17 @@ public class RedisGameSearchIndex : IGameSearchIndex
 
         float[] askVector = await _embedder.EmbedAsync(ask.Text);
 
-        List<SearchResult> results = await SearchAsync(askVector, table, ownedNames, maxResults, ask);
+        // A-31: StackExchange.Redis makes no spans, so this one is the FT.SEARCH call: a Client
+        // span that the application map shows as Redis.
+        List<SearchResult> results;
+        using (Activity? querySpan = SearchTelemetry.StartRedisSpan("Query the Search Index", _redis))
+        {
+            querySpan?.SetTag(SearchTelemetry.ProviderTag, "redis");
+            results = await SearchAsync(askVector, table, ownedNames, maxResults, ask);
+            querySpan?.SetTag(SearchTelemetry.ResultCountTag, results.Count);
+        }
+
+        using Activity? rankSpan = SearchTelemetry.Source.StartActivity("Rank");
 
         PutEqualDistancesInNameOrder(results);
 
@@ -93,6 +104,7 @@ public class RedisGameSearchIndex : IGameSearchIndex
             recommendations.Add(new Recommendation(game, recommendations.Count + 1, reason));
         }
 
+        rankSpan?.SetTag(SearchTelemetry.ResultCountTag, recommendations.Count);
         return recommendations;
     }
 

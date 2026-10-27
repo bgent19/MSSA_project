@@ -105,12 +105,31 @@ public class CachedGameSearchIndex : IGameSearchIndex
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        // Null when Redis could not be reached; then the cache is skipped for this Ask.
-        string? key = await TryBuildKeyAsync(ask, table, maxResults);
+        // The lookup is one span (A-31): reading the generation and the entry. A miss ends the span
+        // here, so the Provider's own spans come after it, not inside it.
+        string? key;
+        List<Recommendation>? cached = null;
+        using (Activity? lookupSpan = SearchTelemetry.StartRedisSpan("Recommendation cache lookup", _redis))
+        {
+            lookupSpan?.SetTag(SearchTelemetry.ProviderTag, _providerName);
+
+            // Null when Redis could not be reached; then the cache is skipped for this Ask.
+            key = await TryBuildKeyAsync(ask, table, maxResults);
+
+            if (key != null)
+            {
+                cached = await TryReadAsync(key);
+            }
+
+            lookupSpan?.SetTag(SearchTelemetry.CacheHitTag, cached != null);
+            if (key == null)
+            {
+                lookupSpan?.SetStatus(ActivityStatusCode.Error, "Redis unavailable, cache skipped");
+            }
+        }
 
         if (key != null)
         {
-            List<Recommendation>? cached = await TryReadAsync(key);
             if (cached != null)
             {
                 _logger.LogInformation(

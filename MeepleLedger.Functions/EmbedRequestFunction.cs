@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using Microsoft.Azure.Cosmos;
@@ -47,6 +48,10 @@ public class EmbedRequestFunction
     {
         string label = $"#{message.SequenceNumber} (delivery {message.DeliveryCount})";
 
+        // One span per delivery, in the trace of whoever queued the message (A-31). The Cosmos read,
+        // the embeddings call and the vector patch all hang under it.
+        using Activity? span = FunctionTelemetry.StartConsumerSpan("Embed request", message);
+
         // 1. Read the body. A body that cannot be read now will not be readable on the 5th try
         //    either, so dead-letter it straight away with a reason. Throwing would only abandon it,
         //    and it would come back 4 more times first.
@@ -70,6 +75,7 @@ public class EmbedRequestFunction
         {
             await messageActions.DeadLetterMessageAsync(message, deadLetterReason: "BadPayload", deadLetterErrorDescription: badPayload, cancellationToken: cancellationToken);
             _logger.LogWarning("{Label} dead-lettered: BadPayload. {Description}", label, badPayload);
+            FunctionTelemetry.SetOutcome(span, "dead-lettered", "BadPayload");
             return;
         }
 
@@ -79,6 +85,7 @@ public class EmbedRequestFunction
             string description = $"This function reads schema version {EmbedRequest.CurrentSchemaVersion}; the message is version {request.SchemaVersion} (0 means the field is missing).";
             await messageActions.DeadLetterMessageAsync(message, deadLetterReason: "UnsupportedSchemaVersion", deadLetterErrorDescription: description, cancellationToken: cancellationToken);
             _logger.LogWarning("{Label} dead-lettered: UnsupportedSchemaVersion. {Description}", label, description);
+            FunctionTelemetry.SetOutcome(span, "dead-lettered", "UnsupportedSchemaVersion");
             return;
         }
 
@@ -87,8 +94,11 @@ public class EmbedRequestFunction
             string description = "The request has no gameId.";
             await messageActions.DeadLetterMessageAsync(message, deadLetterReason: "BadPayload", deadLetterErrorDescription: description, cancellationToken: cancellationToken);
             _logger.LogWarning("{Label} dead-lettered: BadPayload. {Description}", label, description);
+            FunctionTelemetry.SetOutcome(span, "dead-lettered", "BadPayload");
             return;
         }
+
+        span?.SetTag("meepleledger.game", request.GameId);
 
         // 3. Do the work. Anything that fails from here on might work next time, so it is abandoned
         //    and Service Bus dead-letters it after the 5th delivery.
@@ -96,11 +106,14 @@ public class EmbedRequestFunction
         {
             string outcome = await _embedder.EmbedGameAsync(request.GameId, cancellationToken);
             _logger.LogInformation("{Label} '{GameId}': {Outcome}. Completed by the host.", label, request.GameId, outcome);
+            FunctionTelemetry.SetOutcome(span, "completed", null);
         }
         catch (Exception ex)
         {
             string error = ShortError(ex);
             _logger.LogWarning("{Label} '{GameId}': failed: {Error}", label, request.GameId, error);
+            span?.AddException(ex);
+            FunctionTelemetry.SetOutcome(span, "abandoned", error);
 
             // Abandon puts the message straight back, so without a pause a short outage would use up
             // all 5 deliveries in a second. The host keeps renewing the lock while we wait.

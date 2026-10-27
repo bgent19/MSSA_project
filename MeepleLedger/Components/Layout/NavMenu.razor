@@ -1,3 +1,5 @@
+@inject IFeatureManager FeatureManager
+
 <div class="top-row ps-3 navbar navbar-dark">
     <div class="container-fluid">
         <a class="navbar-brand" href="">
@@ -24,10 +26,25 @@
             <NavLink class="nav-link" href="/stats" Match="NavLinkMatch.All">
                 <span class="meeple token-green" aria-hidden="true"></span> Statistics
             </NavLink>
-            <NavLink class="nav-link" href="/tonight" Match="NavLinkMatch.All">
-                <span class="meeple token-red" aria-hidden="true"></span> Tonight
-            </NavLink>
+            @if (_tonightEnabled)
+            {
+                <NavLink class="nav-link" href="/tonight" Match="NavLinkMatch.All">
+                    <span class="meeple token-red" aria-hidden="true"></span> Tonight
+                </NavLink>
+            }
         </div>
     </nav>
     <p class="sidebar-foot">Rules lawyers welcome.</p>
 </div>
+
+@code {
+    // The Tonight link is behind a feature flag (A-30). The layout is not interactive, so this runs
+    // on every page load and every (enhanced) navigation: flip the flag in App Configuration, and the
+    // link comes or goes on the next page once the app has refreshed.
+    private bool _tonightEnabled;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _tonightEnabled = await FeatureManager.IsEnabledAsync(AppConfigKeys.TonightFeature);
+    }
+}

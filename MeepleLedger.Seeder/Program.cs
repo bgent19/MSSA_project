@@ -1,4 +1,5 @@
 ﻿
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
@@ -8,10 +9,14 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Xml.Linq;
 using Azure.Messaging.ServiceBus;
+using Azure.Monitor.OpenTelemetry.Exporter;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
 using Npgsql;
+using OpenTelemetry;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Pgvector;
 using Pgvector.Npgsql;
 using StackExchange.Redis;
@@ -1551,6 +1556,12 @@ static async Task<int> WatchCosmos(string instanceName)
         return 1;
     }
 
+    // A-31: with the AzureMonitor:ConnectionString secret, every batch that queues an embed request is
+    // the START of a trace: this batch, the Service Bus send, then the worker or the Function that
+    // embeds it and patches the vector back, all under one trace id. Disposed when the watcher stops,
+    // which sends any spans still waiting.
+    using TracerProvider? tracerProvider = StartChangeFeedTracing(config);
+
     // camelCase, the same as upload-cosmos, so the documents read back into CosmosGameDocument
     CosmosClientOptions options = new CosmosClientOptions
     {
@@ -1619,6 +1630,14 @@ static async Task<int> WatchCosmos(string instanceName)
     {
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {changes.Count} change(s) on lease {context.LeaseToken}, {context.Headers.RequestCharge:0.00} RU to read");
 
+        // The root of the trace (A-31). Each embed request sent below is a child of it, and carries
+        // the trace on to whoever takes it off the queue.
+        using Activity? batchSpan = SeederTelemetry.Source.StartActivity("Change feed batch", ActivityKind.Consumer);
+        batchSpan?.SetTag("meepleledger.lease", context.LeaseToken);
+        batchSpan?.SetTag("meepleledger.change_count", changes.Count);
+        batchSpan?.SetTag("meepleledger.cosmos.request_charge", context.Headers.RequestCharge);
+        int queued = 0;
+
         foreach (CosmosGameDocument game in changes)
         {
             if (string.IsNullOrWhiteSpace(game.Blurb))
@@ -1652,6 +1671,13 @@ static async Task<int> WatchCosmos(string instanceName)
             };
 
             await queue.SendAsync(request);
+            queued++;
+        }
+
+        batchSpan?.SetTag("meepleledger.queued_count", queued);
+        if (batchSpan != null && queued > 0)
+        {
+            Console.WriteLine($"  trace id {batchSpan.TraceId}");
         }
 
         // Any write to a Game can change what the Tonight cache holds: an edited Blurb (its
@@ -1708,6 +1734,34 @@ static async Task<int> WatchCosmos(string instanceName)
     }
     Console.WriteLine("Stopped.");
     return 0;
+}
+
+// Starts OpenTelemetry for watch-cosmos when the AzureMonitor:ConnectionString secret is set (A-31),
+// or returns null. The service name is the watcher's box on the Application Insights application map.
+//
+// Only our own spans and the Service Bus SDK's are traced. Not the Cosmos SDK's: the change feed
+// processor polls the container every few seconds, and each poll would be a trace of its own.
+static TracerProvider? StartChangeFeedTracing(IConfiguration config)
+{
+    string? connectionString = config["AzureMonitor:ConnectionString"];
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.WriteLine("No AzureMonitor:ConnectionString secret, so no traces (A-31).");
+        return null;
+    }
+
+    // The Azure SDKs only make spans with this switch on
+    AppContext.SetSwitch("Azure.Experimental.EnableActivitySource", true);
+
+    string serviceName = "meepleledger-change-feed";
+    Console.WriteLine($"Traces go to Application Insights (service {serviceName}).");
+
+    return Sdk.CreateTracerProviderBuilder()
+        .ConfigureResource(resource => resource.AddService(serviceName))
+        .AddSource(SeederTelemetry.SourceName)
+        .AddSource("Azure.Messaging.ServiceBus.*")
+        .AddAzureMonitorTraceExporter(options => options.ConnectionString = connectionString)
+        .Build();
 }
 
 // Creates the pgvector extension on the Flexible Server and checks it is there (A-11).
@@ -3606,6 +3660,15 @@ class QueryCharge
     public string FirstId { get; set; } = "";
 }
 
+// The Seeder's spans (A-31): only watch-cosmos makes any. With tracing off nothing listens,
+// StartActivity returns null, and every "span?." call does nothing.
+static class SeederTelemetry
+{
+    public const string SourceName = "MeepleLedger.ChangeFeed";
+
+    public static readonly ActivitySource Source = new ActivitySource(SourceName);
+}
+
 // The intent to re-embed one Game, as the change feed handler records it (A-10). A-19 sends the
 // same shape over Service Bus, so it carries a schema version from the start. MeepleLedger.Worker
 // has a copy of this class that reads it; keep the two in step.
@@ -3644,6 +3707,12 @@ class ServiceBusEmbedRequestQueue : IEmbedRequestQueue
 
     public async Task SendAsync(EmbedRequest request)
     {
+        // A-31: a Producer span for the send. The Service Bus SDK's own send span hangs under it.
+        using Activity? span = SeederTelemetry.Source.StartActivity("Queue embed request", ActivityKind.Producer);
+        span?.SetTag("meepleledger.game", request.GameId);
+        span?.SetTag("messaging.system", "servicebus");
+        span?.SetTag("messaging.destination.name", QueueName);
+
         ServiceBusMessage message = new ServiceBusMessage(JsonSerializer.Serialize(request, JsonOptions));
         message.ContentType = "application/json";
         message.Subject = "EmbedRequest";
@@ -3651,6 +3720,14 @@ class ServiceBusEmbedRequestQueue : IEmbedRequestQueue
         // The schema version is in the body, and again as a property so it can be read (or
         // filtered on) without parsing the body
         message.ApplicationProperties["schemaVersion"] = request.SchemaVersion;
+
+        // The trace context, so the worker or the Function joins this trace. A message carries no
+        // trace unless it is put there; without this the two sides are unrelated traces. Activity.Id
+        // is already in the W3C traceparent format: 00-<trace id>-<span id>-<flags>.
+        if (span != null)
+        {
+            message.ApplicationProperties["traceparent"] = span.Id;
+        }
 
         await sender.SendMessageAsync(message);
         Console.WriteLine($"  '{request.GameId}': {request.Reason}, embed request published (hash {request.TextHash.Substring(0, 8)})");
