@@ -1,0 +1,65 @@
+# A-28: the embed worker (A-19), from the meepleledger-worker image in ACR. The image is a placeholder
+# filled in by deploy-aks.ps1, like the web app's.
+#
+# No Service: nothing calls the worker, it takes messages off the embed-requests queue. And no
+# probes: it has no HTTP endpoint, and if the process exits Kubernetes restarts it anyway.
+# Kubernetes gives the container no stdin, so the worker waits for SIGTERM (sent on a pod delete or
+# rollout) instead of Enter, as in docker (A-23).
+#
+# It competes for the queue with every other reader: the Container Apps revisions (A-26, A-27) and
+# meepleledger-func (A-22). That is harmless (the worker is idempotent), but the log lines you
+# expect may show up somewhere else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meepleledger-worker
+  namespace: meepleledger
+  labels:
+    app: meepleledger-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meepleledger-worker
+  template:
+    metadata:
+      labels:
+        app: meepleledger-worker
+    spec:
+      containers:
+        - name: worker
+          image: "__WORKER_IMAGE__"
+          envFrom:
+            - configMapRef:
+                name: meepleledger-config
+          env:
+            - name: ServiceBus__ConnectionString
+              valueFrom:
+                secretKeyRef:
+                  name: meepleledger-secrets
+                  key: servicebus-connection-string
+            - name: AzureOpenAI__Key
+              valueFrom:
+                secretKeyRef:
+                  name: meepleledger-secrets
+                  key: azure-openai-key
+            - name: Cosmos__Key
+              valueFrom:
+                secretKeyRef:
+                  name: meepleledger-secrets
+                  key: cosmos-key
+            # The worker puts CONTAINER_APP_REPLICA_NAME on every log line (A-27). Container Apps
+            # sets it; here the downward API sets it to the pod name, so the lines say which pod.
+            - name: CONTAINER_APP_REPLICA_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false

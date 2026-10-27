@@ -1102,3 +1102,90 @@ would keep running and take the messages).
 
 **Cost:** nothing while the queue is empty (zero replicas). A test run is a few replica-minutes plus 200
 small embeddings calls and 200 Cosmos patches.
+
+## AKS: deploy by manifest, then tear it down (A-28)
+
+**Time-boxed and metered: do it in one sitting and finish with the teardown.**
+
+```
+pwsh infra/aks/provision-aks.ps1 [-NodeSize Standard_B2s] [-Location eastus2]   # cluster, kubelet AcrPull, kubectl context
+pwsh infra/aks/deploy-aks.ps1 [-Tag <version>] [-WorkerTag <version>] [-Provider InMemory|Cosmos]   # apply the manifests
+pwsh infra/aks/break-aks.ps1 image|crash|ready|live    # break the web app one way; diagnose with kubectl
+pwsh infra/aks/break-aks.ps1 fix [-Provider ...]       # re-apply the manifests
+pwsh infra/aks/teardown-aks.ps1                        # az group delete, then check both groups are gone
+```
+
+The same two images as A-25 and A-26, in an AKS cluster `meepleledger-aks` with a Free tier control plane
+and one `Standard_B2s` node. The cluster has its **own resource group**, `rg-meepleledger-aks`, so that
+deleting the group takes the cluster and nothing else. AKS puts the VM, disk, load balancer and public
+IP in a second group, named `rg-meepleledger-aks-nodes` here so it's easy to find in the portal.
+
+- **Images come from ACR through the kubelet identity.** The kubelet on the node is what pulls, as the
+  cluster's *kubelet* managed identity. `provision-aks.ps1` gives that identity `AcrPull` on
+  `meepleledgeracr`, so the manifests have no `imagePullSecrets` and the registry admin account stays
+  off.
+- **The manifests are hand-written YAML** in [infra/aks/manifests/](infra/aks/manifests/): a namespace
+  (`meepleledger`), a ConfigMap (settings that aren't secret), a Secret (keys), the web Deployment, a
+  `LoadBalancer` Service, and the worker Deployment. Values that change per environment are
+  placeholders in double underscores (`__COSMOS_KEY__`). `deploy-aks.ps1` fills them in from the user
+  secrets and pipes the text to `kubectl apply -f -`, so the filled-in files with real keys are never
+  written to disk. Applying a manifest by hand stores the placeholder text as the value.
+- **A Secret is base64, not encryption.** `kubectl get secret meepleledger-secrets -n meepleledger -o
+  yaml` shows every key to anyone who can read the namespace. A-29 moves them to Key Vault. Each
+  container gets only the keys it reads (`secretKeyRef`); the web app never sees the Service Bus
+  connection string.
+- **Changing a ConfigMap or Secret restarts nothing.** A pod reads its environment once, at start.
+  `deploy-aks.ps1` runs `kubectl rollout restart` on any Deployment that already existed.
+- **The two probes ask different questions.** Readiness is an HTTP GET of `/`: "can this pod serve a
+  page?" Until that passes, the Service sends it nothing. Liveness is only a TCP connect to 8080, after
+  30 seconds, with three misses allowed: "is the process alive?" A failed liveness probe *kills* the
+  container, so it has to be the forgiving one, or a slow Blazor cold start gets killed before it's
+  ready, forever.
+- **Blazor Server across replicas needs affinity.** The Service sets `sessionAffinity: ClientIP` with
+  `externalTrafficPolicy: Local` (so the pod sees the real client IP, not a node's). Without them,
+  scaling to three replicas makes the page reload at random, like A-25 without ARR affinity.
+- **The worker** has no Service and no probes. It competes for `embed-requests` with any other reader
+  (the Container Apps revisions, `meepleledger-func`). Its log lines carry the pod name, through the
+  downward API into `CONTAINER_APP_REPLICA_NAME`.
+
+### Scaling
+
+```
+kubectl scale deployment/meepleledger-web -n meepleledger --replicas=3
+kubectl get pods -n meepleledger -w                      # two new pods: ContainerCreating, Running 0/1, then 1/1
+kubectl get endpoints meepleledger-web -n meepleledger   # three pod IPs, but only once each one is READY
+kubectl scale deployment/meepleledger-web -n meepleledger --replicas=1
+```
+
+A pod joins the Service's endpoints only after its readiness probe passes. Scaling down sends the
+extra pods SIGTERM, and anyone whose circuit was on one of them loses it (the page reloads). Running `deploy-aks.ps1`
+again resets the count to the manifest's `replicas: 1`.
+
+### Breaking it on purpose
+
+| Scenario | What changes | What you see | Where the answer is |
+|---|---|---|---|
+| `image` | image tag `does-not-exist` | `ErrImagePull`, then `ImagePullBackOff` | `kubectl describe pod`: no logs at all, the container never existed |
+| `crash` | ConfigMap `SearchIndex__Provider=Bogus` + restart | `CrashLoopBackOff`, restarts climbing | `kubectl logs <pod> --previous`: the "Unknown SearchIndex:Provider" exception |
+| `ready` | readiness probe on `/not-here` | `Running` but `0/1`, no restarts | `describe`: "Readiness probe failed: ... statuscode: 404"; logs look healthy |
+| `live` | liveness probe on port 8081 | `1/1`, then restarted every ~90 s | `describe`: "Liveness probe failed ... connection refused"; logs look healthy |
+
+**Reach for `describe` first.** `kubectl logs` shows what a container wrote; `describe` (and `kubectl
+get events -n meepleledger --sort-by=.lastTimestamp`) shows why it never became one, or why it was
+killed. In `image`, `crash` and `ready` the site stays up: the rolling update keeps the old pod serving
+until a new one is ready, and the rollout just hangs. In `live` the new pod *does* become ready, so the
+rollout completes and removes the old one, and only then does liveness start killing it. `fix`
+re-applies the manifests, which puts every field back.
+
+### Teardown
+
+`teardown-aks.ps1` removes the kubelet identity's `AcrPull` on the registry first: that assignment is in
+`rg-meepleledger` and would be left behind as "Identity not found". Then it runs `az group delete` on
+`rg-meepleledger-aks`, waits, checks that both groups are gone, and removes the cluster from
+`~/.kube/config`. Then **check the portal**: neither group should be listed under Resource groups.
+Don't delete the Service or the cluster by hand and stop there; that's how a public IP or a disk is left
+behind, still billing.
+
+**Cost:** the control plane is free. The B2s node and its 30 GB OS disk bill per minute while they exist,
+and so does the Service's public IP. A 90-minute sitting is cents; a node pool forgotten for a month is
+the most expensive mistake in the ticket set.

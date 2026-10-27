@@ -1,0 +1,7 @@
+# A-28: everything MeepleLedger runs in AKS lives in this one namespace, so
+#   kubectl get all -n meepleledger
+# shows the whole app, and nothing here mixes with the cluster's own pods in kube-system.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meepleledger

@@ -1,0 +1,79 @@
+# A-28: the MeepleLedger web app (Blazor Server), from the meepleledger image in ACR.
+#
+# The image is pulled by the cluster's KUBELET identity, which has AcrPull on meepleledgeracr
+# (provision-aks.ps1), so there is no imagePullSecrets here. The image is a placeholder that
+# deploy-aks.ps1 fills with <registry>/meepleledger:<version tag>, never :latest (A-24).
+#
+# The two probes ask DIFFERENT questions, on purpose:
+#   - readiness: "can this pod serve a page right now?" An HTTP GET of the home page. Until it
+#     answers 200 the pod is left out of the Service, so no visitor is sent to it. A failing
+#     readiness probe never restarts anything.
+#   - liveness:  "is the process still alive?" Only a TCP connect to port 8080, with a long delay and
+#     a high failure threshold. A failing liveness probe KILLS the container, so it must be the more
+#     forgiving of the two. If liveness were the same GET / with tight timing, a slow cold start
+#     (Blazor Server plus loading the seed) would be killed before it was ever ready, forever.
+# The trade-off: a process that is hung but still accepts TCP connections is not restarted. It does
+# stop being ready, so it stops getting traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meepleledger-web
+  namespace: meepleledger
+  labels:
+    app: meepleledger-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meepleledger-web
+  template:
+    metadata:
+      labels:
+        app: meepleledger-web
+    spec:
+      containers:
+        - name: web
+          image: "__WEB_IMAGE__"
+          ports:
+            - name: http
+              containerPort: 8080      # the .NET images listen on 8080 (A-23)
+          # Every key in the ConfigMap becomes an environment variable
+          envFrom:
+            - configMapRef:
+                name: meepleledger-config
+          # Only the two keys the web app reads; it never gets the Service Bus connection string
+          env:
+            - name: Cosmos__Key
+              valueFrom:
+                secretKeyRef:
+                  name: meepleledger-secrets
+                  key: cosmos-key
+            - name: AzureOpenAI__Key
+              valueFrom:
+                secretKeyRef:
+                  name: meepleledger-secrets
+                  key: azure-openai-key
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30    # give a cold start plenty of time before the first check
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3        # three misses in a row (about a minute) before a restart
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true         # the image runs as the non-root "app" user (A-23)
+            allowPrivilegeEscalation: false

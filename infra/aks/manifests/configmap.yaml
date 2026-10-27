@@ -1,0 +1,25 @@
+# A-28: the settings that are NOT secret. Both Deployments load every key here as an environment
+# variable (envFrom), and .NET reads "__" in a variable name as ":", so SearchIndex__Provider is the
+# setting SearchIndex:Provider. Same names as the App Service app settings (A-25).
+#
+# The values in capitals between double underscores are placeholders. deploy-aks.ps1 replaces them from the user secrets and its
+# own parameters, then pipes the result to kubectl apply. Applying this file by hand would store the
+# placeholder text as the value.
+#
+# Changing a ConfigMap does NOT restart the pods that use it. Environment variables are read once,
+# when a container starts, so a running pod keeps the old value until it is replaced
+# (kubectl rollout restart). deploy-aks.ps1 restarts both Deployments after every apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: meepleledger-config
+  namespace: meepleledger
+data:
+  SearchIndex__Provider: "__SEARCH_PROVIDER__"
+  RecommendationCache__Enabled: "false"
+  EventGrid__Enabled: "false"
+  Cosmos__Endpoint: "__COSMOS_ENDPOINT__"
+  Cosmos__Database: "__COSMOS_DATABASE__"
+  Cosmos__Container: "__COSMOS_CONTAINER__"
+  AzureOpenAI__Endpoint: "__AZURE_OPENAI_ENDPOINT__"
+  AzureOpenAI__EmbeddingDeployment: "__AZURE_OPENAI_DEPLOYMENT__"

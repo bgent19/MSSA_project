@@ -1,0 +1,28 @@
+# A-28: the way in to the web app. A LoadBalancer Service makes AKS create a PUBLIC IP on an Azure
+# load balancer in the node resource group, port 80 -> port 8080 of every READY pod labelled
+# app: meepleledger-web (a pod that fails its readiness probe is left out).
+#
+# The public IP bills separately, and a Service deleted carelessly can leave it behind. Don't clean
+# up Service by Service: teardown-aks.ps1 deletes the resource group, which takes everything.
+#
+# Blazor Server keeps each visitor's circuit in ONE pod's memory, like App Service (A-25). With more
+# than one replica and no affinity, the Service round-robins, and a request that lands on another
+# pod has no circuit: the page reloads, seemingly at random. sessionAffinity: ClientIP sends one
+# client IP back to the same pod. That only works if the pod sees the real client IP, which is what
+# externalTrafficPolicy: Local is for (with Cluster, traffic is source-NATed through a node first).
+# Delete the two lines and scale to 3 to see the reloads for yourself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: meepleledger-web
+  namespace: meepleledger
+spec:
+  type: LoadBalancer
+  selector:
+    app: meepleledger-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  sessionAffinity: ClientIP
+  externalTrafficPolicy: Local
