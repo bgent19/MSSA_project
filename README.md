@@ -1108,7 +1108,7 @@ small embeddings calls and 200 Cosmos patches.
 **Time-boxed and metered: do it in one sitting and finish with the teardown.**
 
 ```
-pwsh infra/aks/provision-aks.ps1 [-NodeSize Standard_B2s] [-Location eastus2]   # cluster, kubelet AcrPull, kubectl context
+pwsh infra/aks/provision-aks.ps1 [-NodeSize Standard_B2ls_v2] [-Location eastus2]   # cluster, kubelet AcrPull, kubectl context
 pwsh infra/aks/deploy-aks.ps1 [-Tag <version>] [-WorkerTag <version>] [-Provider InMemory|Cosmos]   # apply the manifests
 pwsh infra/aks/break-aks.ps1 image|crash|ready|live    # break the web app one way; diagnose with kubectl
 pwsh infra/aks/break-aks.ps1 fix [-Provider ...]       # re-apply the manifests
@@ -1116,7 +1116,7 @@ pwsh infra/aks/teardown-aks.ps1                        # az group delete, then c
 ```
 
 The same two images as A-25 and A-26, in an AKS cluster `meepleledger-aks` with a Free tier control plane
-and one `Standard_B2s` node. The cluster has its **own resource group**, `rg-meepleledger-aks`, so that
+and one `Standard_B2ls_v2` node. The cluster has its **own resource group**, `rg-meepleledger-aks`, so that
 deleting the group takes the cluster and nothing else. AKS puts the VM, disk, load balancer and public
 IP in a second group, named `rg-meepleledger-aks-nodes` here so it's easy to find in the portal.
 
@@ -1186,6 +1186,6 @@ re-applies the manifests, which puts every field back.
 Don't delete the Service or the cluster by hand and stop there; that's how a public IP or a disk is left
 behind, still billing.
 
-**Cost:** the control plane is free. The B2s node and its 30 GB OS disk bill per minute while they exist,
+**Cost:** the control plane is free. The B2ls_v2 node and its 30 GB OS disk bill per minute while they exist,
 and so does the Service's public IP. A 90-minute sitting is cents; a node pool forgotten for a month is
 the most expensive mistake in the ticket set.

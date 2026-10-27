@@ -4,8 +4,11 @@
 #   - rg-meepleledger-aks:       a resource group of its OWN, not rg-meepleledger. The ticket ends
 #                                with "az group delete", and that must take the cluster and nothing
 #                                else (the registry, Cosmos, Service Bus... stay in rg-meepleledger).
-#   - meepleledger-aks:          the cluster. Free tier control plane, ONE small node (Standard_B2s,
+#   - meepleledger-aks:          the cluster. Free tier control plane, ONE small node (Standard_B2ls_v2,
 #                                2 vCPU / 4 GiB, the smallest size AKS accepts for a system pool).
+#                                The older Standard_B2s is not allowed in this subscription in eastus2;
+#                                the "create" error lists the sizes that are. Avoid the "p" sizes
+#                                (B2pls_v2): they are ARM, and the images are built for amd64.
 #   - rg-meepleledger-aks-nodes: the node resource group. AKS always makes one for the VMs, disks,
 #                                load balancer and public IPs; it is named here so it is easy to find in
 #                                the portal (the default is MC_<group>_<cluster>_<region>). AKS deletes
@@ -22,17 +25,17 @@
 # No Container Insights (--enable-addons monitoring): it bills per GB of logs, and this ticket reads
 # logs with kubectl. A-31/A-32 do monitoring properly.
 #
-# METERED, TIME-BOXED. The Free tier control plane costs nothing; the node does (a B2s VM plus its OS
+# METERED, TIME-BOXED. The Free tier control plane costs nothing; the node does (a B2ls_v2 VM plus its OS
 # disk), billed per minute while it exists, and the LoadBalancer Service's public IP bills too. Do the
 # whole ticket in one sitting and finish with:
 #   pwsh infra/aks/teardown-aks.ps1
 #
 # Needs kubectl on the PATH (Docker Desktop ships one, or: az aks install-cli).
 #
-# Run from the repo root:  pwsh infra/aks/provision-aks.ps1 [-NodeSize Standard_B2s] [-Location eastus2]
+# Run from the repo root:  pwsh infra/aks/provision-aks.ps1 [-NodeSize Standard_B2ls_v2] [-Location eastus2]
 
 param(
-    [string]$NodeSize = "Standard_B2s",
+    [string]$NodeSize = "Standard_B2ls_v2",
     [string]$Location = "eastus2"          # same region as the registry
 )
 
@@ -104,7 +107,7 @@ else {
         --no-ssh-key `
         --tags "ticket=A-28" `
         --output none
-    Test-LastCommand "create cluster $clusterName (if the size is not offered here, try -NodeSize Standard_D2s_v3 or another -Location)"
+    Test-LastCommand "create cluster $clusterName (if the size is not offered here, the error lists the sizes that are; try -NodeSize Standard_B2s_v2 or another -Location)"
 }
 
 # 5. AcrPull for the kubelet identity, scoped to the one registry. --assignee-object-id with the
