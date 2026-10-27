@@ -1,0 +1,18 @@
+// Retrieval latency by Provider (p50, p95, p99)
+// Which Provider is slowest? The "Query the Search Index" span is the retrieval step only: no
+// embeddings call, no ranking. Every Provider makes one, tagged meepleledger.provider.
+//
+// Internal spans (and Redis's Client span) land in AppDependencies, not AppRequests. Custom span
+// attributes land in Properties (customDimensions in the classic Application Insights schema) as
+// strings, so they are pulled out with tostring() before they can be grouped by.
+AppDependencies
+| where TimeGenerated > ago(24h)
+| where Name == "Query the Search Index"
+| extend Provider = tostring(Properties["meepleledger.provider"])
+| summarize
+    Queries = count(),
+    p50 = percentile(DurationMs, 50),
+    p95 = percentile(DurationMs, 95),
+    p99 = percentile(DurationMs, 99)
+    by Provider
+| order by p95 desc

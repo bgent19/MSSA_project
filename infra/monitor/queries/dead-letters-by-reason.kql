@@ -1,0 +1,25 @@
+// Dead-lettered embed requests by reason
+// What is dead-lettering, and why? Two ways a message ends in the dead-letter queue:
+//   - the consumer dead-letters it itself (BadPayload, UnsupportedSchemaVersion): outcome
+//     "dead-lettered", reason in meepleledger.outcome.reason
+//   - it is abandoned on its 5th delivery and Service Bus moves it (MaxDeliveryCountExceeded): the
+//     consumer never sees that happen, so it is the "abandoned" span whose delivery count is 5, the
+//     queue's max delivery count (infra/servicebus/provision-servicebus.ps1); its reason is the error
+//     that made the last try fail
+// The consumer is the Function (meepleledger-func) or the Worker (meepleledger-worker).
+AppRequests
+| where TimeGenerated > ago(7d)
+| where Name == "Embed request"
+| extend
+    Outcome = tostring(Properties["meepleledger.outcome"]),
+    Delivery = toint(Properties["meepleledger.delivery_count"]),
+    Reason = tostring(Properties["meepleledger.outcome.reason"])
+| where Outcome == "dead-lettered" or (Outcome == "abandoned" and Delivery >= 5)
+| extend DeadLetterReason = iff(Outcome == "dead-lettered", Reason, "MaxDeliveryCountExceeded")
+| summarize
+    Messages = count(),
+    LastSeen = max(TimeGenerated),
+    Consumers = make_set(AppRoleName),
+    SampleErrors = make_set_if(Reason, Outcome == "abandoned", 3)
+    by DeadLetterReason
+| order by Messages desc

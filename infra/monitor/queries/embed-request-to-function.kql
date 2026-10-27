@@ -1,0 +1,37 @@
+// Embed request joined to the Function execution it triggered
+// Did each queued embed request get handled, by what, after how long, and how did it end?
+//
+// The left side is the "Queue embed request" Producer span: the Seeder's watch-cosmos (one per Blurb
+// edit) or the Worker's send. Its span id goes on the message as traceparent, so the consumer's
+// "Embed request" span (the Function, or the Worker) has the same OperationId and has it as ParentId.
+// That pair is the join key. A leftouter join keeps requests nobody has handled yet (Handler empty);
+// a message delivered more than once gives one row per delivery.
+//
+// An Ask never triggers a Function in this design: answering one only reads. This trace (change
+// feed -> Service Bus -> Function) is the one that crosses into a Function.
+let since = ago(24h);
+let sent = AppDependencies
+    | where TimeGenerated > since
+    | where Name == "Queue embed request"
+    | project
+        OperationId,
+        SendSpanId = Id,
+        SentAt = TimeGenerated,
+        Sender = AppRoleName,
+        Game = tostring(Properties["meepleledger.game"]);
+let handled = AppRequests
+    | where TimeGenerated > since
+    | where Name == "Embed request"
+    | project
+        OperationId,
+        ParentId,
+        HandledAt = TimeGenerated,
+        Handler = AppRoleName,
+        HandleMs = DurationMs,
+        Delivery = toint(Properties["meepleledger.delivery_count"]),
+        Outcome = tostring(Properties["meepleledger.outcome"]);
+sent
+| join kind=leftouter handled on $left.OperationId == $right.OperationId, $left.SendSpanId == $right.ParentId
+| extend QueueWaitMs = datetime_diff("millisecond", HandledAt, SentAt)
+| project SentAt, Game, Sender, Handler, Delivery, Outcome, QueueWaitMs, HandleMs, OperationId
+| order by SentAt desc

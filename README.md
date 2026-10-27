@@ -1407,3 +1407,51 @@ the `Ask` spans in Application Insights (Performance, or Transaction search on `
 
 **Cost:** Application Insights bills per GB ingested (the first 5 GB a month per billing account are
 free). An Ask is a handful of spans.
+
+## KQL: questions about the running system (A-32)
+
+```
+pwsh infra/monitor/save-queries.ps1                        # every infra/monitor/queries/*.kql -> saved search in meepleledger-logs
+pwsh infra/monitor/run-query.ps1 [name]                    # run one query file here and print the rows (no name: list them)
+pwsh infra/monitor/provision-alert.ps1 [-Email <address>]  # log search alert: dead-lettered embed requests, last 15 minutes
+```
+
+The queries read the spans A-31 sends. One file per question in `infra/monitor/queries/`, saved to the
+workspace (category `MeepleLedger`) so none of them lives only in a portal scratch tab:
+
+| File | Question |
+|---|---|
+| `retrieval-latency-by-provider` | p50/p95/p99 of `Query the Search Index`, split by Provider |
+| `cache-hit-rate-hourly` | Recommendation cache hits, misses and skips per hour, and the hit rate |
+| `failed-dependencies` | failed outside calls, grouped by target, type and result code |
+| `embed-request-to-function` | a `join`: each `Queue embed request` and the `Embed request` execution it triggered |
+| `zero-recommendation-asks` | Asks that returned nothing, and the Tables that caused them |
+| `ask-latency-timechart` | p95 of the `Ask` span per Provider, `render timechart` |
+| `dead-letters-by-reason` | what is dead-lettering, from which consumer, and why |
+
+- **Workspace table names.** `meepleledger-func-insights` is workspace-based, and the queries are saved
+  to the workspace, so they use `AppRequests`, `AppDependencies` and `Properties`. The classic names
+  (`requests`, `dependencies`, `customDimensions`) only work in the Application Insights resource's own
+  Logs blade; in the workspace they return nothing, with no error.
+- **Where the spans land.** Server and Consumer spans (`Embed request`) are in `AppRequests`. Internal
+  spans (`Ask`, `Query the Search Index`, `Rank`) and Client/Producer spans (`Queue embed request`, the
+  Redis spans) are in `AppDependencies`; Internal ones have `DependencyType == "InProc"`.
+- **Attributes are text in `Properties`.** `tostring(Properties["meepleledger.provider"])` before
+  grouping, `toint(...)` before comparing numbers. Bools are compared after `tolower(...)`.
+- **Provider case.** The `Ask` span has the setting as typed (`Cosmos`), the retrieval span lower case
+  (`cosmos`). Filter with `=~`, which ignores case; `==` doesn't.
+- **The join.** An Ask never triggers a Function: answering one only reads. The trace that does cross into
+  a Function is change feed -> Service Bus -> Function, so the join is there: the consumer span's
+  `ParentId` is the producer span's `Id`, in the same `OperationId`.
+- **Dead letters.** A consumer that dead-letters a message itself tags its span `meepleledger.outcome`
+  `dead-lettered` and `meepleledger.outcome.reason`. A message Service Bus dead-letters after the 5th
+  delivery (`MaxDeliveryCountExceeded`) is never seen as such by the consumer, so the queries count an
+  `abandoned` span with `meepleledger.delivery_count` 5 as one.
+- **The alert** (`meepleledger-dead-letters`) runs `infra/monitor/alerts/dead-lettered-messages.kql`
+  every 15 minutes over the last 15 and fires on any row. It is a log alert, not one on the Service Bus
+  `DeadletteredMessages` metric: that metric counts what is *sitting* in the dead-letter queue, so it
+  stays up until someone purges it. Without `-Email` there is no action group and the alert only shows
+  in Monitor > Alerts. A trace that was sampled away (or tracing off) is invisible to it.
+
+**Cost:** saved searches and queries are free. The alert rule bills per month by how often it runs
+(15 minutes is the cheapest step); deleting `rg-meepleledger` removes it.

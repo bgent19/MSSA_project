@@ -46,6 +46,8 @@ public static class FunctionTelemetry
     }
 
     // How the message ended: completed, abandoned or dead-lettered. Anything but completed is an error.
+    // The reason is an attribute as well as the status description, so a KQL query can group by it
+    // (A-32: infra/monitor/queries/dead-letters-by-reason.kql).
     public static void SetOutcome(Activity? span, string outcome, string? reason)
     {
         if (span == null)
@@ -54,6 +56,10 @@ public static class FunctionTelemetry
         }
 
         span.SetTag("meepleledger.outcome", outcome);
+        if (reason != null)
+        {
+            span.SetTag("meepleledger.outcome.reason", reason);
+        }
         if (outcome != "completed")
         {
             span.SetStatus(ActivityStatusCode.Error, reason);
