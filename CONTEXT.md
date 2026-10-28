@@ -15,7 +15,8 @@ structured facts because it is the only free text the project holds, and therefo
 that can carry meaning a number cannot. A Game may have no Blurb.
 
 **Catalog** — every Game the app knows about. Searchable, never owned. The Catalog is the universe;
-the Collection is a subset of it.
+the Collection is a subset of it. The Catalog grows: when the owner meets a Game it lacks, they add
+it from BoardGameGeek, and from then on it is a Game like any other. Games never leave the Catalog.
 
 **Owned Game** — a Game that is on your shelf, together with the facts that only apply because it is
 yours: when you acquired it, what condition it is in, and any notes. The distinction between Game
@@ -31,7 +32,10 @@ never of the Game.
 
 **Play** — one session of one Game on one date, with the people who were there and how it went.
 
-**Player Result** — one person's outcome within a Play: who they were and whether they won.
+**Player** — a person who sat at a Play, known only by name. Two names that differ only in case or
+in surrounding spaces are the same Player. The owner is a Player.
+
+**Player Result** — one Player's outcome within a Play: who they were and whether they won.
 
 **Play Log** — the full history of Plays. Answers questions about the past; it does not own the
 Collection and does not care whether a played Game is owned.
@@ -55,6 +59,13 @@ Recommendation.
 **Search Index** — the thing that turns an Ask plus a Table into ranked Games. Deliberately named
 for what it does rather than what it is built on, because the project has several and they are
 interchangeable.
+
+## Where the data comes from
+
+**Seed** — the Catalog, Collection and Play Log compiled into the app so it runs with nothing else
+attached. The Seed's Collection is the owner's real shelf; the Seed's Plays are invented, with
+invented players, and exist only so the screens have something to show. Seed Plays never count as
+history.
 
 **Provider** — which concrete implementation is currently serving the Search Index and the store.
 A deployment-time fact, never a domain one. The domain must never be able to tell which Provider is
