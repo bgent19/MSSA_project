@@ -18,6 +18,30 @@ namespace MeepleLedger.Tests
         }
 
         [Fact]
+        public void GameCollection_Replace_SwapsInTheEditedOwnedGame()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var collection = new GameCollection();
+            collection.Add(new OwnedGame { Game = catan, Condition = Condition.Mint });
+
+            var edited = new OwnedGame { Game = catan, Condition = Condition.Worn, Notes = "Lost a road" };
+            collection.Replace(edited);
+
+            Assert.Same(edited, collection.Get("Catan"));
+            Assert.Equal(1, collection.TotalGames);
+        }
+
+        [Fact]
+        public void GameCollection_Replace_RejectsATitleNotOwned()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var collection = new GameCollection();
+
+            Assert.Throws<InvalidOperationException>(() => collection.Replace(new OwnedGame { Game = catan }));
+            Assert.Equal(0, collection.TotalGames);
+        }
+
+        [Fact]
         public void Play_Constructor_RejectsMoreResultsThanMaxPlayers()
         {
             var patchwork = new Game { Name = "Patchwork", MinPlayers = 2, MaxPlayers = 2 };

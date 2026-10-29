@@ -3,7 +3,8 @@
 # Creates (or reuses) the resource group, a serverless Cosmos DB account with NoSQL vector search
 # turned on, a "meepleledger" database and a "games" container, then stores the endpoint and key
 # in the Seeder's user secrets. Also creates the "leases" container the change feed processor
-# needs (A-10). Safe to run again: anything that already exists is left alone.
+# needs (A-10), and the "ownedGames" and "plays" containers the durable store keeps the Collection and
+# the Play Log in (S-04). Safe to run again: anything that already exists is left alone.
 #
 # METERED. Serverless bills per request unit and per GB stored, so an idle account with 200 games
 # costs close to nothing, but it is still a billable resource. A-33 tears it down.
@@ -16,6 +17,8 @@ $accountName = "meepleledger-cosmos"
 $databaseName = "meepleledger"
 $containerName = "games"
 $leaseContainerName = "leases"   # bookkeeping for the change feed processor (A-10)
+$ownedGamesContainerName = "ownedGames"   # the durable store's Collection (S-04), Cosmos:OwnedGamesContainer
+$playsContainerName = "plays"             # the durable store's Play Log (S-04), Cosmos:PlaysContainer
 
 # One sentence on the partition key: the only access patterns are point upserts by Game and a
 # vector search over the whole Catalog for every Ask, so no key could scope the search and /id
@@ -172,7 +175,31 @@ else {
     Test-LastCommand "create leases container"
 }
 
-# 7. Connection details go into the Seeder's user secrets, never into appsettings.json.
+# 7. The durable store's containers (S-04): one document per Owned Game (id = the Game's name) and
+#    one per Play (id = Play.Id). Partition key /ownerName: every document has the same owner, so
+#    it is one logical partition (20 GB, far more than any Play Log), and the startup load is a
+#    single-partition read. No vector or full-text policy; the default indexing policy is enough.
+#    S-09 copies these two blocks into the production script.
+foreach ($storeContainerName in @($ownedGamesContainerName, $playsContainerName)) {
+    $existingStoreContainer = az cosmosdb sql container list --account-name $accountName --resource-group $resourceGroup --database-name $databaseName --query "[?name=='$storeContainerName'].name" -o tsv
+    if ($existingStoreContainer -eq $storeContainerName) {
+        Write-Host "Container $storeContainerName already exists."
+    }
+    else {
+        Write-Host "Creating container $storeContainerName for the durable store..."
+        az cosmosdb sql container create `
+            --account-name $accountName `
+            --resource-group $resourceGroup `
+            --database-name $databaseName `
+            --name $storeContainerName `
+            --partition-key-path "/ownerName" `
+            --output none
+        Test-LastCommand "create $storeContainerName container"
+    }
+}
+
+# 8. Connection details go into the Seeder's user secrets, never into appsettings.json.
+#    The store's container names are not secret and live in MeepleLedger/appsettings.json.
 $endpoint = az cosmosdb show --name $accountName --resource-group $resourceGroup --query documentEndpoint -o tsv
 Test-LastCommand "read account endpoint"
 $key = az cosmosdb keys list --name $accountName --resource-group $resourceGroup --query primaryMasterKey -o tsv
@@ -191,4 +218,5 @@ Write-Host "  Account:        $accountName"
 Write-Host "  Endpoint:       $endpoint"
 Write-Host "  Container:      $databaseName/$containerName (partition key $partitionKeyPath)"
 Write-Host "  Leases:         $databaseName/$leaseContainerName (partition key /id)"
+Write-Host "  Store:          $databaseName/$ownedGamesContainerName and $databaseName/$playsContainerName (partition key /ownerName)"
 Write-Host "  User secrets:   Cosmos:Endpoint, Cosmos:Key, Cosmos:Database, Cosmos:Container, Cosmos:LeaseContainer on MeepleLedger.Seeder"

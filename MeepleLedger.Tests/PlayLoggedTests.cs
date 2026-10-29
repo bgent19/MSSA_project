@@ -74,6 +74,11 @@ namespace MeepleLedger.Tests
         {
             public GameCollection Collection { get; } = new();
             public PlayLog PlayLog { get; } = new() { OwnerName = "Brett" };
+
+            public Task SaveOwnedGameAsync(OwnedGame ownedGame) => Task.CompletedTask;
+            public Task RemoveOwnedGameAsync(string gameName) => Task.CompletedTask;
+            public Task SavePlayAsync(Play play) => Task.CompletedTask;
+            public Task RemovePlayAsync(Guid playId) => Task.CompletedTask;
         }
     }
 }

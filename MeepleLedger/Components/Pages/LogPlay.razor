@@ -138,7 +138,7 @@ else
 
     private void AddPlayer() => _results.Add(new PlayerResult { PlayerName = "" });
 
-    private void Submit()
+    private async Task Submit()
     {
         _error = null;
         _confirmation = null;
@@ -153,15 +153,19 @@ else
                      .Where(r => !string.IsNullOrWhiteSpace(r.PlayerName))
                      .ToList();
 
+        // The domain checks the Play first; only a Play it accepts is saved.
+        Play play;
         try
         {
             if (_editing is null)
             {
-                Store.PlayLog.Record(new Play(_game, _date, results, _duration, _location));
+                play = new Play(_game, _date, results, _duration, _location);
+                Store.PlayLog.Record(play);
             }
             else
             {
-                Store.PlayLog.Replace(new Play(_game, _date, results, _duration, _location) { Id = _editing.Id });
+                play = new Play(_game, _date, results, _duration, _location) { Id = _editing.Id };
+                Store.PlayLog.Replace(play);
             }
         }
         catch (ArgumentOutOfRangeException)
@@ -178,6 +182,27 @@ else
         }
         catch(InvalidOperationException ex)
         {
+            _error = ex.Message;
+            return;
+        }
+
+        // Then the store. If the save fails, undo the change in the log so the screen still
+        // matches what is stored.
+        try
+        {
+            await Store.SavePlayAsync(play);
+        }
+        catch (StoreWriteException ex)
+        {
+            if (_editing is null)
+            {
+                Store.PlayLog.Remove(play.Id);
+            }
+            else
+            {
+                Store.PlayLog.Replace(_editing);
+            }
+
             _error = ex.Message;
             return;
         }

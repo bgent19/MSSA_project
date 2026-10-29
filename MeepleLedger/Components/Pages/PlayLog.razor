@@ -25,6 +25,11 @@
     </div>
 </div>
 
+@if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+
 <p class="text-muted mb-2">@Rows.Count plays, most recent first</p>
 
 @if (Rows.Count == 0)
@@ -77,6 +82,7 @@ else
     private string _gameName = "";
     private bool _notOwnedOnly;
     private Play? _pendingDelete;
+    private string? _error;
 
     private IReadOnlyList<Play> Rows
     {
@@ -92,8 +98,22 @@ else
         }
     }
 
-    private void Delete(Play play)
+    private async Task Delete(Play play)
     {
+        _error = null;
+
+        // The store first: if that fails, the Play is still in the log and still on screen.
+        try
+        {
+            await Store.RemovePlayAsync(play.Id);
+        }
+        catch (StoreWriteException ex)
+        {
+            _error = ex.Message;
+            _pendingDelete = null;
+            return;
+        }
+
         Store.PlayLog.Remove(play.Id);
         _pendingDelete = null;
 

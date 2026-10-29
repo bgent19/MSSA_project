@@ -1,12 +1,19 @@
 @page "/collection/add"
+@page "/collection/edit/{*Name}"
 @rendermode InteractiveServer
 @inject IMeepleStore Store
 @inject NavigationManager Nav
 
-<PageTitle>Add a Game</PageTitle>
+<PageTitle>@Heading</PageTitle>
 
-<h1>Add a Game</h1>
-<p class="page-lede">Another box for the shelf. Where it physically fits is between you and your bookcase.</p>
+<h1>@Heading</h1>
+<p class="page-lede">@(IsEditing ? "A new sleeve, a lost meeple, a note for next time." : "Another box for the shelf. Where it physically fits is between you and your bookcase.")</p>
+
+@if (IsEditing && _editing is null)
+{
+    <p class="empty-state">No game in your collection is called "@Name". <a href="">Back to the Collection</a></p>
+    return;
+}
 
 @if (_game is null)
 {
@@ -17,7 +24,10 @@ else
     <div class="chosen-game">
         <strong>@_game.Name</strong>
         <small class="text-muted">@_game.MinPlayers-@_game.MaxPlayers players</small>
-        <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
+        @if (!IsEditing)
+        {
+            <button class="btn btn-link btn-sm" @onclick="() => _game = null">change</button>
+        }
     </div>
 }
 
@@ -35,6 +45,10 @@ else
         <label class="form-label">Date acquired</label>
         <input type="date" class="form-control" @bind="_dateAcquired" />
     </div>
+    <div class="col-12">
+        <label class="form-label">Notes</label>
+        <input type="text" class="form-control" @bind="_notes" />
+    </div>
 </div>
 
 @if (_error is not null)
@@ -42,17 +56,50 @@ else
     <div class="alert alert-danger">@_error</div>
 }
 
-<button class="btn btn-primary mb-3" @onclick="Submit">Add to collection</button>
+<button class="btn btn-primary mb-3" @onclick="Submit">@(IsEditing ? "Save changes" : "Add to collection")</button>
 <a class="btn btn-outline-secondary mb-3 ms-2" href="">Cancel</a>
+@if (IsEditing)
+{
+    @if (_confirmRemove)
+    {
+        <button class="btn btn-danger mb-3 ms-2" @onclick="Remove">confirm remove</button>
+        <button class="btn btn-link mb-3" @onclick="() => _confirmRemove = false">keep it</button>
+    }
+    else
+    {
+        <button class="btn btn-outline-danger mb-3 ms-2" @onclick="() => _confirmRemove = true">Remove from collection</button>
+    }
+}
 
 
 @code {
+    [Parameter] public string? Name { get; set; }
+
+    private OwnedGame? _editing;
     private Game? _game;
     private Condition _condition = Condition.Mint;
     private DateTime _dateAcquired = DateTime.Today;
+    private string? _notes;
     private string? _error;
+    private bool _confirmRemove;
 
-    private void Submit()
+    private bool IsEditing => Name is not null;
+    private string Heading => IsEditing ? "Edit a Game" : "Add a Game";
+
+    protected override void OnParametersSet()
+    {
+        _editing = Name is null ? null : Store.Collection.Get(Name);
+
+        if (_editing is not null)
+        {
+            _game = _editing.Game;
+            _condition = _editing.Condition;
+            _dateAcquired = _editing.DateAcquired;
+            _notes = _editing.Notes;
+        }
+    }
+
+    private async Task Submit()
     {
         _error = null;
 
@@ -62,10 +109,20 @@ else
             return;
         }
 
-        // No duplicate pre-check here: GameCollection.Add owns that rule.
+        // A fresh OwnedGame, so the stored one is never changed in place.
+        var owned = new OwnedGame { Game = _game, Condition = _condition, DateAcquired = _dateAcquired, Notes = _notes };
+
+        // The domain first. No duplicate pre-check here: GameCollection.Add owns that rule.
         try
         {
-            Store.Collection.Add(new OwnedGame { Game = _game, Condition = _condition, DateAcquired = _dateAcquired });
+            if (_editing is null)
+            {
+                Store.Collection.Add(owned);
+            }
+            else
+            {
+                Store.Collection.Replace(owned);
+            }
         }
         catch (InvalidOperationException ex)
         {
@@ -73,6 +130,51 @@ else
             return;
         }
 
+        // Then the store. If the save fails, undo the change so the screen matches what is stored.
+        try
+        {
+            await Store.SaveOwnedGameAsync(owned);
+        }
+        catch (StoreWriteException ex)
+        {
+            if (_editing is null)
+            {
+                Store.Collection.Remove(owned.Game.Name);
+            }
+            else
+            {
+                Store.Collection.Replace(_editing);
+            }
+
+            _error = ex.Message;
+            return;
+        }
+
+        Nav.NavigateTo(IsEditing ? $"games/{Uri.EscapeDataString(_game.Name)}" : "");
+    }
+
+    private async Task Remove()
+    {
+        _error = null;
+        _confirmRemove = false;
+
+        if (_editing is null)
+        {
+            return;
+        }
+
+        // The store first: if that fails, the Game is still in the Collection and still on screen.
+        try
+        {
+            await Store.RemoveOwnedGameAsync(_editing.Game.Name);
+        }
+        catch (StoreWriteException ex)
+        {
+            _error = ex.Message;
+            return;
+        }
+
+        Store.Collection.Remove(_editing.Game.Name);
         Nav.NavigateTo("");
     }
 }

@@ -164,7 +164,26 @@ builder.Services.AddRazorComponents()
 builder.Services.AddFeatureManagement();
 
 builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
-builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
+
+// Where the Collection and the Play Log live (S-04). InMemory is the default and needs nothing
+// (ADR-0001): the Seed, gone at every restart. Cosmos keeps them in the Cosmos:OwnedGamesContainer
+// and Cosmos:PlaysContainer containers and needs the Cosmos:* settings. Read once at startup: unlike
+// the Search Index Provider, switching the store needs a restart.
+// Pick it with: dotnet run --project MeepleLedger -- --MeepleStore:Provider=Cosmos
+string meepleStoreProvider = builder.Configuration["MeepleStore:Provider"] ?? "InMemory";
+if (meepleStoreProvider == "InMemory")
+{
+    builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
+}
+else if (meepleStoreProvider == "Cosmos")
+{
+    // Takes the app's one CosmosClient (registered below), so the Cosmos key is read once.
+    builder.Services.AddSingleton<IMeepleStore, CosmosMeepleStore>();
+}
+else
+{
+    throw new InvalidOperationException("Unknown MeepleStore:Provider '" + meepleStoreProvider + "'. Use InMemory or Cosmos.");
+}
 
 // The Search Index Providers. Every Provider and every client is registered, but a singleton
 // factory only runs the first time something asks for it, so a Provider that is never used never
@@ -326,7 +345,7 @@ if (keyVaultEnabled)
 
 if (appConfigEnabled || keyVaultEnabled)
 {
-    string[] settingsToTrace = { SwitchingGameSearchIndex.ProviderSetting, "AzureOpenAI:Key", "Cosmos:Key", "Postgres:ConnectionString", "Redis:ConnectionString", "EventGrid:TopicKey" };
+    string[] settingsToTrace = { SwitchingGameSearchIndex.ProviderSetting, "MeepleStore:Provider", "AzureOpenAI:Key", "Cosmos:Key", "Postgres:ConnectionString", "Redis:ConnectionString", "EventGrid:TopicKey" };
     foreach (string name in settingsToTrace)
     {
         app.Logger.LogInformation("  {Setting} is read from {Source}", name, SettingSource(builder.Configuration, name));
@@ -338,8 +357,10 @@ if (tracingEnabled)
     app.Logger.LogInformation("Traces go to Application Insights (service meepleledger-web).");
 }
 
-// Get a startup fail if Data is not good
+// Get a startup fail if Data is not good: a bad seed row, or (on the Cosmos store) a stored row that
+// breaks an invariant or names a Game the Catalog doesn't have.
 app.Services.GetRequiredService<IMeepleStore>();
+app.Logger.LogInformation("The Collection and the Play Log are kept by the {Provider} store.", meepleStoreProvider);
 
 // Get a startup fail if the Provider the setting names right now is missing a setting. A Provider
 // switched to later fails its Asks instead (see SwitchingGameSearchIndex).

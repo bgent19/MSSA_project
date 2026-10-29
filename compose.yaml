@@ -35,6 +35,8 @@ services:
       # InMemory unless .env says otherwise. Postgres or Redis also needs the AzureOpenAI__* settings,
       # because an Ask is embedded by Azure OpenAI whichever Provider answers it.
       SearchIndex__Provider: ${SEARCH_INDEX_PROVIDER:-InMemory}
+      # Where the Collection and the Play Log live (S-04). Cosmos needs the Cosmos__* settings.
+      MeepleStore__Provider: ${MEEPLE_STORE_PROVIDER:-InMemory}
       RecommendationCache__Enabled: ${RECOMMENDATION_CACHE_ENABLED:-false}
       # The local containers below, by their service names. Only read when a setting above uses them.
       Postgres__ConnectionString: Host=postgres;Port=5432;Database=meepleledger;Username=meeple;Password=${POSTGRES_PASSWORD:-meeple-local}

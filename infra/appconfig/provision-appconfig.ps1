@@ -10,6 +10,8 @@
 #   Key (label)                          Value
 #   SearchIndex:Provider (local)         InMemory, only if missing: a re-run keeps your choice
 #   SearchIndex:Provider (azure)         InMemory, the same
+#   MeepleStore:Provider (local, azure)  InMemory, only if missing (S-04). Read once at startup, so
+#                                        unlike SearchIndex:Provider a change needs a restart
 #   Cosmos:Endpoint, AzureOpenAI:Endpoint, AzureOpenAI:EmbeddingDeployment, EventGrid:TopicEndpoint
 #                        (no label)      from the user secrets: not secret, shared by local and azure
 #   AzureOpenAI:Key, Cosmos:Key, ServiceBus:ConnectionString, Postgres:ConnectionString,
@@ -60,6 +62,7 @@ $workerIdentityName = "meepleledger-worker-id"   # from provision-containerapps.
 # These names are in the code too (AppConfigKeys.cs, SwitchingGameSearchIndex.cs, the Worker); keep them in step.
 $labels = @("local", "azure")
 $providerKey = "SearchIndex:Provider"
+$storeProviderKey = "MeepleStore:Provider"   # S-04, read in Program.cs
 $sentinelKey = "MeepleLedger:Sentinel"
 $tonightFlag = "Tonight"
 
@@ -231,6 +234,16 @@ foreach ($label in $labels) {
     }
     else {
         Set-Setting $providerKey "InMemory" $label
+    }
+
+    # The store that keeps the Collection and the Play Log (S-04), the same rule: never overwritten,
+    # so a re-run can't put a site that keeps real Plays back on the in-memory Seed.
+    $currentStore = Get-Setting $storeProviderKey $label
+    if ($currentStore) {
+        Write-Host "  $storeProviderKey ($label) is $currentStore (left as it is)."
+    }
+    else {
+        Set-Setting $storeProviderKey "InMemory" $label
     }
 }
 

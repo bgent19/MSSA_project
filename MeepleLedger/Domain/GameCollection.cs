@@ -23,6 +23,19 @@
             Changed?.Invoke(game.Game.Name);
         }
 
+        // Swaps in a new Owned Game for the one with the same Game name, e.g. after the condition
+        // or notes were edited. Build a fresh OwnedGame rather than changing the stored one.
+        public void Replace(OwnedGame game)
+        {
+            if (!_games.ContainsKey(game.Game.Name))
+            {
+                throw new InvalidOperationException("Title not found in collection.");
+            }
+
+            _games[game.Game.Name] = game;
+            Changed?.Invoke(game.Game.Name);
+        }
+
         public void Remove(string name)
         {
             if (!_games.Remove(name))

@@ -23,4 +23,13 @@ public class InMemoryMeepleStore : IMeepleStore
             PlayLog.Record(play);
         }
     }
+
+    // Nothing is kept beyond the Collection and the Play Log themselves, so there is nothing to save.
+    public Task SaveOwnedGameAsync(OwnedGame ownedGame) => Task.CompletedTask;
+
+    public Task RemoveOwnedGameAsync(string gameName) => Task.CompletedTask;
+
+    public Task SavePlayAsync(Play play) => Task.CompletedTask;
+
+    public Task RemovePlayAsync(Guid playId) => Task.CompletedTask;
 }
