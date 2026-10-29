@@ -10,6 +10,9 @@ using System.Text.Json;
 using System.Xml.Linq;
 using Azure.Messaging.ServiceBus;
 using Azure.Monitor.OpenTelemetry.Exporter;
+using MeepleLedger.Data;
+using MeepleLedger.Domain;
+using MeepleLedger.Storage;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
@@ -20,6 +23,9 @@ using OpenTelemetry.Trace;
 using Pgvector;
 using Pgvector.Npgsql;
 using StackExchange.Redis;
+
+// Where the command was run from, so a file path argument (import-ledger) still means what was typed
+string startDirectory = Environment.CurrentDirectory;
 
 // Set working directory to solution root
 var currentDir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -55,6 +61,23 @@ if (args.FirstOrDefault() == "upload-cosmos")
 if (args.FirstOrDefault() == "seed-ledger")
 {
     return await SeedLedger();
+}
+
+if (args.FirstOrDefault() == "import-ledger")
+{
+    // import-ledger <file> [scratch database]
+    if (args.Length < 2)
+    {
+        Console.WriteLine("Usage: import-ledger <export file> [scratch database]");
+        return 1;
+    }
+
+    string? scratchDatabase = null;
+    if (args.Length > 2)
+    {
+        scratchDatabase = args[2];
+    }
+    return await ImportLedger(Path.GetFullPath(args[1], startDirectory), scratchDatabase);
 }
 
 if (args.FirstOrDefault() == "measure-ru")
@@ -634,6 +657,219 @@ static async Task<int> SeedLedger()
     Console.WriteLine($"Total request charge: {totalCharge:0.00} RU");
     return 0;
 }
+// Loads an export file (S-06, written by the app's GET /export) into an empty durable store: the
+// ownedGames and plays containers. Every row goes through the domain classes first (LedgerExport.Load:
+// GameCollection.Add, PlayLog.Record), and nothing is written if any row breaks an invariant. It
+// refuses a store that isn't empty: an import never merges into or overwrites real data.
+// With a scratch database name it imports there instead, creating the database and the two containers
+// if they don't exist, for the round-trip check. Metered: two count queries and one write per row.
+static async Task<int> ImportLedger(string path, string? scratchDatabase)
+{
+    // The same owner as InMemoryMeepleStore, CosmosMeepleStore.OwnerName and EmitLog; they must match
+    string ownerName = "TheGentleBean";
+
+    // 1. Read and check the whole file before touching Cosmos
+    if (!File.Exists(path))
+    {
+        Console.WriteLine($"No file at {path}");
+        return 1;
+    }
+
+    LedgerExportFile file;
+    LoadedLedger ledger;
+    try
+    {
+        file = LedgerExport.FromJson(File.ReadAllText(path));
+        ledger = LedgerExport.Load(file, CatalogSeed.Games);
+    }
+    catch (Exception ex) when (ex is InvalidOperationException || ex is ArgumentException || ex is JsonException)
+    {
+        // ArgumentException covers ArgumentOutOfRangeException: more Players than the Game seats
+        Console.WriteLine($"The file can't be imported: {ex.Message}");
+        Console.WriteLine("Nothing was written.");
+        return 1;
+    }
+
+    if (file.OwnerName != ownerName)
+    {
+        Console.WriteLine($"The file belongs to '{file.OwnerName}', but this store's owner is '{ownerName}'. Nothing was written.");
+        return 1;
+    }
+
+    // TODO S-07: a Game added at runtime is in file.Games with its full facts, and Load has already put
+    // it in the Catalog it checked the rows against. Writing it into the Cosmos games container (with
+    // its vector and embeddingTextHash) before the rows that use it belongs to S-07, which is where the
+    // live Catalog starts being loaded from that container. Until then such a file is refused.
+    if (file.Games.Count > 0)
+    {
+        Console.WriteLine($"The file has {file.Games.Count} Games outside the compiled Catalog. Restoring them needs S-07. Nothing was written.");
+        return 1;
+    }
+
+    // Build the documents from the domain objects, not from the file's rows, so what is written is
+    // exactly what CosmosMeepleStore would write (trimmed names, this owner). Plays keep their Ids.
+    List<OwnedGameDocument> ownedGameDocuments = [];
+    List<PlayDocument> playDocuments = [];
+    try
+    {
+        foreach (OwnedGame ownedGame in ledger.Collection.Games)
+        {
+            ownedGameDocuments.Add(MeepleDocuments.FromOwnedGame(ownedGame, ownerName));
+        }
+
+        foreach (Play play in ledger.PlayLog.RecentFirst())
+        {
+            playDocuments.Add(MeepleDocuments.FromPlay(play, ownerName));
+        }
+    }
+    catch (InvalidOperationException ex)
+    {
+        Console.WriteLine($"The file can't be imported: {ex.Message}");
+        Console.WriteLine("Nothing was written.");
+        return 1;
+    }
+
+    Console.WriteLine($"File:            {path}");
+    Console.WriteLine($"Exported on:     {file.ExportedOn} (format version {file.FormatVersion})");
+    Console.WriteLine($"Checked:         {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays, every row valid");
+    Console.WriteLine();
+
+    // 2. Where it goes. Environment variables are read too (Cosmos__Database=...), after user secrets
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .AddEnvironmentVariables()
+        .Build();
+
+    string? endpoint = config["Cosmos:Endpoint"];
+    string? key = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(databaseName))
+    {
+        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key and Cosmos:Database");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets them).");
+        return 1;
+    }
+
+    if (scratchDatabase != null && scratchDatabase == databaseName)
+    {
+        Console.WriteLine($"'{scratchDatabase}' is the real database, not a scratch one. Leave the argument off to import into it.");
+        return 1;
+    }
+
+    // The web app reads these names from its appsettings.json; a user secret can override them here
+    string ownedGamesName = config["Cosmos:OwnedGamesContainer"] ?? "ownedGames";
+    string playsName = config["Cosmos:PlaysContainer"] ?? "plays";
+
+    // camelCase, the same as the web app's CosmosClient, so "ownerName" matches the partition key path
+    CosmosClientOptions options = new CosmosClientOptions
+    {
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    using CosmosClient client = new CosmosClient(endpoint, key, options);
+    double totalCharge = 0;
+
+    if (scratchDatabase != null)
+    {
+        // Serverless accounts take no throughput, so none is passed. The partition key matches
+        // provision-cosmos.ps1's store containers.
+        databaseName = scratchDatabase;
+        DatabaseResponse database = await client.CreateDatabaseIfNotExistsAsync(databaseName);
+        totalCharge += database.RequestCharge;
+        ContainerResponse ownedGamesCreated = await database.Database.CreateContainerIfNotExistsAsync(ownedGamesName, "/ownerName");
+        totalCharge += ownedGamesCreated.RequestCharge;
+        ContainerResponse playsCreated = await database.Database.CreateContainerIfNotExistsAsync(playsName, "/ownerName");
+        totalCharge += playsCreated.RequestCharge;
+    }
+
+    Container ownedGamesContainer = client.GetContainer(databaseName, ownedGamesName);
+    Container playsContainer = client.GetContainer(databaseName, playsName);
+
+    // The account name is the first part of the endpoint's host, e.g. meepleledger-cosmos
+    string accountName = new Uri(endpoint).Host.Split('.')[0];
+
+    Console.WriteLine($"Cosmos account:  {accountName} ({endpoint})");
+    if (scratchDatabase != null)
+    {
+        Console.WriteLine($"Database:        {databaseName} (scratch)");
+    }
+    else
+    {
+        Console.WriteLine($"Database:        {databaseName}");
+    }
+    Console.WriteLine($"Containers:      {ownedGamesName}, {playsName}");
+    Console.WriteLine();
+
+    // 3. Refuse a store that isn't empty. There is no --force: empty both containers by hand first
+    DocumentCount ownedGamesExisting = await CountDocuments(ownedGamesContainer);
+    DocumentCount playsExisting = await CountDocuments(playsContainer);
+    totalCharge += ownedGamesExisting.Charge + playsExisting.Charge;
+
+    if (ownedGamesExisting.Count > 0 || playsExisting.Count > 0)
+    {
+        Console.WriteLine($"Refusing: {ownedGamesName} holds {ownedGamesExisting.Count} documents and {playsName} holds {playsExisting.Count}. Nothing was written.");
+        Console.WriteLine("import-ledger only loads an empty store.");
+        return 1;
+    }
+
+    Console.WriteLine($"About to write {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays for {ownerName}.");
+    Console.Write("Continue? [y/N] ");
+
+    if (Console.ReadLine()?.Trim().ToLower() != "y")
+    {
+        Console.WriteLine("Stopped. Nothing was written.");
+        return 0;
+    }
+
+    // 4. Write. Create, not upsert: the containers were empty, so a conflict means someone else is writing too
+    PartitionKey partitionKey = new PartitionKey(ownerName);
+
+    for (int i = 0; i < ownedGameDocuments.Count; i++)
+    {
+        OwnedGameDocument document = ownedGameDocuments[i];
+        ItemResponse<OwnedGameDocument> response = await ownedGamesContainer.CreateItemAsync(document, partitionKey);
+        totalCharge += response.RequestCharge;
+        Console.WriteLine($"[Owned Game {i + 1}/{ownedGameDocuments.Count}] {document.Id}");
+    }
+
+    for (int i = 0; i < playDocuments.Count; i++)
+    {
+        PlayDocument document = playDocuments[i];
+        ItemResponse<PlayDocument> response = await playsContainer.CreateItemAsync(document, partitionKey);
+        totalCharge += response.RequestCharge;
+        Console.WriteLine($"[Play {i + 1}/{playDocuments.Count}] {document.PlayedOn} {document.GameName}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"Wrote {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays into {databaseName}");
+    Console.WriteLine($"Total request charge: {totalCharge:0.00} RU");
+    return 0;
+}
+
+// How many documents a container holds, and what counting them cost
+static async Task<DocumentCount> CountDocuments(Container container)
+{
+    DocumentCount result = new DocumentCount();
+
+    using FeedIterator<int> iterator = container.GetItemQueryIterator<int>("SELECT VALUE COUNT(1) FROM c");
+    while (iterator.HasMoreResults)
+    {
+        FeedResponse<int> page = await iterator.ReadNextAsync();
+        result.Charge += page.RequestCharge;
+
+        foreach (int count in page)
+        {
+            result.Count += count;
+        }
+    }
+
+    return result;
+}
+
 static void EmitLog()
 {
     // Output file
@@ -3794,6 +4030,13 @@ class SeedOwnedGameDocument
     public string DateAcquired { get; set; } = "";
     public string Condition { get; set; } = "";
     public string? Notes { get; set; }
+}
+
+// What CountDocuments found in one container (import-ledger)
+class DocumentCount
+{
+    public int Count { get; set; }
+    public double Charge { get; set; }
 }
 
 // One Game as stored in the PostgreSQL games table (infra/postgres/games-schema.sql).

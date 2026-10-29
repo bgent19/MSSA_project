@@ -20,4 +20,15 @@
     <PackageReference Include="StackExchange.Redis" Version="3.4.5" />
   </ItemGroup>
 
+  <!-- S-06: import-ledger replays an export through the real domain classes and reads it with the
+       app's own export code, so these files are compiled in here too (links, not copies). The
+       compiled Catalog comes along: emit rewrites CatalogSeed.cs, so a seed that won't compile now
+       stops the Seeder building as well; the recovery is still git checkout + re-emit. -->
+  <ItemGroup>
+    <Compile Include="..\MeepleLedger\Domain\*.cs" Link="Linked\Domain\%(Filename)%(Extension)" />
+    <Compile Include="..\MeepleLedger\Data\CatalogSeed.cs" Link="Linked\Data\CatalogSeed.cs" />
+    <Compile Include="..\MeepleLedger\Storage\MeepleDocuments.cs" Link="Linked\Storage\MeepleDocuments.cs" />
+    <Compile Include="..\MeepleLedger\Storage\LedgerExport.cs" Link="Linked\Storage\LedgerExport.cs" />
+  </ItemGroup>
+
 </Project>

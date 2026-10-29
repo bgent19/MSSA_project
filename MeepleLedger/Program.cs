@@ -394,6 +394,18 @@ if (appConfigEnabled)
 app.UseAntiforgery();
 
 app.MapStaticAssets();
+
+// The export (S-06): the Collection and the Play Log as one JSON file download. A plain GET, so the
+// Collection page's link needs no JavaScript. Works on every store; on the in-memory one it exports the
+// Seed. The Seeder's import-ledger reads the file back into an empty store.
+app.MapGet("/export", (IMeepleStore store) =>
+{
+    DateTime today = DateTime.Today;
+    LedgerExportFile file = LedgerExport.Build(store.Collection, store.PlayLog, MeepleLedger.Data.CatalogSeed.Games, today);
+    byte[] bytes = System.Text.Encoding.UTF8.GetBytes(LedgerExport.ToJson(file));
+    return Results.File(bytes, "application/json", LedgerExport.FileName(today));
+});
+
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
