@@ -22,5 +22,10 @@
       "path": "/embedding",
       "type": "quantizedFlat"
     }
+  ],
+  "fullTextIndexes": [
+    {
+      "path": "/facts"
+    }
   ]
 }

@@ -25,8 +25,13 @@ $partitionKeyPath = "/id"
 
 # The vector and indexing policies live next to this script. The vector policy cannot be changed
 # once the container exists, so check the path (/embedding) and dimensions (1536) before running.
+# The full-text policy (S-02) names /facts, the Game's categories and mechanics as one string, for
+# hybrid search. Not /categories/[] and /mechanics/[]: Azure accepts array paths, but FullTextContains
+# and FullTextScore on c.mechanics then match nothing. Unlike the vector policy it can be added to a
+# container that already exists, and step 5 does that.
 $vectorPolicyFile = Join-Path $PSScriptRoot "games-vector-policy.json"
 $indexingPolicyFile = Join-Path $PSScriptRoot "games-indexing-policy.json"
+$fullTextPolicyFile = Join-Path $PSScriptRoot "games-full-text-policy.json"
 
 # Stop on the first failed az command instead of carrying on with half a setup.
 function Test-LastCommand([string]$step) {
@@ -104,15 +109,34 @@ else {
     Test-LastCommand "create database"
 }
 
-# 5. The container, with the vector policy and indexing policy declared up front.
+# 5. The container, with the vector, full-text and indexing policies declared up front.
 #    In PowerShell a bare @name means splatting, so the "@file" arguments must be quoted.
 $existingContainer = az cosmosdb sql container list --account-name $accountName --resource-group $resourceGroup --database-name $databaseName --query "[?name=='$containerName'].name" -o tsv
 if ($existingContainer -eq $containerName) {
     Write-Host "Container $containerName already exists. Its vector policy cannot be changed in place;"
     Write-Host "delete the container and run this script again if the policy is wrong."
+
+    # The full-text policy and the indexing policy can be changed in place (S-02), so a container
+    # made before hybrid search gets them here. Sending the same policies again changes nothing.
+    $fullTextPaths = az cosmosdb sql container show --account-name $accountName --resource-group $resourceGroup --database-name $databaseName --name $containerName --query "resource.fullTextPolicy.fullTextPaths[].path" -o tsv
+    if ($fullTextPaths -notcontains "/facts") {
+        Write-Host "Adding the full-text policy and full-text indexes to $containerName..."
+        az cosmosdb sql container update `
+            --account-name $accountName `
+            --resource-group $resourceGroup `
+            --database-name $databaseName `
+            --name $containerName `
+            --full-text-policy "@$fullTextPolicyFile" `
+            --idx "@$indexingPolicyFile" `
+            --output none
+        Test-LastCommand "add full-text policy"
+    }
+    else {
+        Write-Host "Container $containerName already has its full-text policy."
+    }
 }
 else {
-    Write-Host "Creating container $containerName with the vector policy..."
+    Write-Host "Creating container $containerName with the vector and full-text policies..."
     az cosmosdb sql container create `
         --account-name $accountName `
         --resource-group $resourceGroup `
@@ -120,6 +144,7 @@ else {
         --name $containerName `
         --partition-key-path $partitionKeyPath `
         --vector-embeddings "@$vectorPolicyFile" `
+        --full-text-policy "@$fullTextPolicyFile" `
         --idx "@$indexingPolicyFile" `
         --output none
     Test-LastCommand "create container"

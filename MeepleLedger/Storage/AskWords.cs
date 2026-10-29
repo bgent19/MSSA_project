@@ -17,16 +17,22 @@ public static class AskWords
         "game", "games", "play", "playing", "want", "what", "should", "can", "could", "would",
         "our", "you", "your", "are", "about", "like", "please", "tonight", "good", "fun",
         "player", "players", "people", "friends", "two", "three", "four", "five", "six",
-        "quick", "short", "long", "minutes", "hour", "hours",
+        "quick", "short", "long", "minutes", "hour", "hours", "lots",
     ];
 
     // The words of the Ask worth searching for: long enough, not filler, and without a plural "s"
     // so that "cards" still finds "Card Game".
+    // A hyphenated word counts joined and in halves (S-02): "co-op" gives "coop", which finds
+    // "Cooperative Game", and "deck-building" gives "deck" and "building" as well, which find
+    // "Deck, Bag, and Pool Building".
     public static List<string> FindUsefulWords(string text)
     {
         List<string> useful = [];
 
-        foreach (string word in SplitIntoWords(text))
+        List<string> words = SplitIntoWords(text);
+        words.AddRange(SplitIntoWords(text.Replace('-', ' ')));
+
+        foreach (string word in words)
         {
             if (word.Length < ShortestUsefulWord || WordsToIgnore.Contains(word))
             {

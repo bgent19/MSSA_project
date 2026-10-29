@@ -668,7 +668,7 @@ static void EmitLog()
             throw new Exception($"'{play.Name}' is not in the catalog. Find() would throw.");
         }
 
-        if (!play.Results.Any(r => r.PlayerName == owner))
+        if (!play.Results.Any(r => string.Equals(r.PlayerName.Trim(), owner, StringComparison.OrdinalIgnoreCase)))
         {
             throw new Exception($"A play of '{play.Name}' is missing {owner}. PlayLog.Record would throw.");
         }
@@ -676,6 +676,18 @@ static void EmitLog()
         if (play.Results.Count > maxPlayers[play.Name])
         {
             throw new Exception($"A play of '{play.Name}' seats {play.Results.Count}, max is {maxPlayers[play.Name]}.");
+        }
+
+        // Same rule as the Play constructor: "Tom" and "tom " are one Player, who can't sit twice
+        for (int i = 0; i < play.Results.Count; i++)
+        {
+            for (int j = i + 1; j < play.Results.Count; j++)
+            {
+                if (string.Equals(play.Results[i].PlayerName.Trim(), play.Results[j].PlayerName.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new Exception($"A play of '{play.Name}' has {play.Results[j].PlayerName} twice. new Play would throw.");
+                }
+            }
         }
     }
 
@@ -965,6 +977,16 @@ static async Task<int> Embed()
     return 0;
 }
 
+// "Cooperative Game, Card Game, Hand Management": the categories then the mechanics, for the
+// full-text policy on /facts (S-02).
+static string BuildFacts(List<string> categories, List<string> mechanics)
+{
+    List<string> facts = [];
+    facts.AddRange(categories);
+    facts.AddRange(mechanics);
+    return string.Join(", ", facts);
+}
+
 // The text that gets embedded for one Game: name, categories and mechanics as well as the Blurb,
 // so a search for "deck building" can match on the mechanic even if the Blurb never says it.
 // MeepleLedger.Worker and MeepleLedger.Functions (EmbeddingText.Build) have copies that must build
@@ -1139,6 +1161,7 @@ static async Task<int> UploadCosmos()
                 PlaytimeMinutes = int.Parse(item.Element("playingtime")!.Attribute("value")!.Value),
                 Categories = LinkValues(item, "boardgamecategory"),
                 Mechanics = LinkValues(item, "boardgamemechanic"),
+                Facts = BuildFacts(LinkValues(item, "boardgamecategory"), LinkValues(item, "boardgamemechanic")),
                 Weight = weight,
                 Blurb = blurb,
                 Embedding = vectors[name].Vector,
@@ -3582,6 +3605,11 @@ class CosmosGameDocument
     public int PlaytimeMinutes { get; set; }
     public List<string> Categories { get; set; } = [];
     public List<string> Mechanics { get; set; } = [];
+
+    // Categories and mechanics as one string, the field hybrid search scores with FullTextScore (S-02).
+    // Full-text search in Cosmos matches nothing on an array path like /mechanics/[], so it needs a string.
+    public string Facts { get; set; } = "";
+
     public double? Weight { get; set; }
     public string? Blurb { get; set; }
     public float[] Embedding { get; set; } = [];

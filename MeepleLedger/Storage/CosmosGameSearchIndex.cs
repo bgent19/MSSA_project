@@ -12,9 +12,15 @@ namespace MeepleLedger.Storage;
 // Contract notes (see IGameSearchIndex):
 //   - The Table is applied in the WHERE clause, so Cosmos only ranks Games the Table admits and
 //     TOP never counts a Game that would be thrown away afterwards.
-//   - The vector ordering is the ordering. ORDER BY VectorDistance cannot take a second sort key,
-//     so the Name tie-break is applied here, and only between neighbours with exactly equal scores.
-//     That only reorders results; it never drops or adds one.
+//   - The ordering is Cosmos's. ORDER BY VectorDistance (or ORDER BY RANK) cannot take a second
+//     sort key, so the Name tie-break is applied here, and only between neighbours with exactly
+//     equal vector scores. That only reorders results; it never drops or adds one.
+//
+// Hybrid search (S-02): vector distance alone ranked competitive Games above obvious co-op ones
+// for a short Ask like "quick co-op for three" (A-34). When the Ask names something a category or
+// mechanic in the Catalog starts with, the query ranks by RRF (reciprocal rank fusion) of the vector
+// distance and a full-text (BM25) score over /facts, the categories and mechanics as one string
+// (FullTextTerms picks the words; full-text search matches nothing on the /categories array itself). An Ask that names nothing of the kind (a vague mood) is ranked by the vector alone.
 public class CosmosGameSearchIndex : IGameSearchIndex
 {
     // How many categories and mechanics to name in a Reason when none of the Ask's words matched.
@@ -79,6 +85,7 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         }
 
         float[] askVector = await _embedder.EmbedAsync(ask.Text);
+        List<string> fullTextTerms = FullTextTerms.Find(ask.Text, _catalogSource.Catalog.Games);
 
         // A-31: the Cosmos SDK's own span for the query sits under this one (Program.cs turns the
         // SDK's tracing on).
@@ -86,8 +93,9 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         using (Activity? querySpan = SearchTelemetry.Source.StartActivity("Query the Search Index"))
         {
             querySpan?.SetTag(SearchTelemetry.ProviderTag, "cosmos");
+            querySpan?.SetTag("meepleledger.cosmos.full_text_terms", fullTextTerms.Count);
 
-            QueryDefinition query = BuildQuery(askVector, table, ownedNames, maxResults);
+            QueryDefinition query = BuildQuery(askVector, fullTextTerms, table, ownedNames, maxResults);
             results = await RunQueryAsync(query, ask, querySpan);
 
             querySpan?.SetTag(SearchTelemetry.ResultCountTag, results.Count);
@@ -114,7 +122,8 @@ public class CosmosGameSearchIndex : IGameSearchIndex
     // The Table's rules, mirrored from Table.Admits, go in the WHERE so they run before ranking.
     // A 0 for players or playtime means unknown in BGG data and does not rule a Game out.
     // Only the id and the score are projected: SELECT * would send 1536 floats back per Game.
-    private static QueryDefinition BuildQuery(float[] askVector, Table table, List<string> ownedNames, int maxResults)
+    // FullTextScore can only appear in ORDER BY RANK, so the projected score is always the vector's.
+    private static QueryDefinition BuildQuery(float[] askVector, List<string> fullTextTerms, Table table, List<string> ownedNames, int maxResults)
     {
         StringBuilder sql = new StringBuilder();
         sql.AppendLine("SELECT TOP @maxResults c.id, VectorDistance(c.embedding, @askVector) AS score");
@@ -128,8 +137,35 @@ public class CosmosGameSearchIndex : IGameSearchIndex
             sql.AppendLine("  AND ARRAY_CONTAINS(@ownedNames, c.id)");
         }
 
-        // No ASC or DESC: VectorDistance ordering always puts the closest match first.
-        sql.AppendLine("ORDER BY VectorDistance(c.embedding, @askVector)");
+        // e.g. "@term0, @term1" - one parameter per term, so no Ask text is ever pasted into the SQL.
+        string termParameters = "";
+        for (int i = 0; i < fullTextTerms.Count; i++)
+        {
+            if (i > 0)
+            {
+                termParameters += ", ";
+            }
+
+            termParameters += "@term" + i;
+        }
+
+        if (fullTextTerms.Count == 0)
+        {
+            // No ASC or DESC: VectorDistance ordering always puts the closest match first.
+            sql.AppendLine("ORDER BY VectorDistance(c.embedding, @askVector)");
+        }
+        else
+        {
+            // RRF adds 1 / (k + rank) from each list, so a Game near the top of both wins.
+            // ORDER BY RANK needs the TOP above; the WHERE still applies first.
+            // The weights count the full-text rank twice: with equal weights the vector's top three
+            // still beat every co-op Game for "quick co-op for three"; heavier than 2 pushed
+            // Clank! out of "a deck-building game for two" (S-02 benchmark).
+            sql.AppendLine("ORDER BY RANK RRF(");
+            sql.AppendLine("  VectorDistance(c.embedding, @askVector),");
+            sql.AppendLine("  FullTextScore(c.facts, " + termParameters + "),");
+            sql.AppendLine("  [1, 2])");
+        }
 
         QueryDefinition query = new QueryDefinition(sql.ToString())
             .WithParameter("@maxResults", maxResults)
@@ -140,6 +176,11 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         if (table.OwnedOnly)
         {
             query = query.WithParameter("@ownedNames", ownedNames);
+        }
+
+        for (int i = 0; i < fullTextTerms.Count; i++)
+        {
+            query = query.WithParameter("@term" + i, fullTextTerms[i]);
         }
 
         return query;
@@ -164,7 +205,7 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         }
 
         _logger.LogInformation(
-            "Cosmos vector search for \"{Ask}\" returned {Count} Games for {RequestCharge} RU",
+            "Cosmos search for \"{Ask}\" returned {Count} Games for {RequestCharge} RU",
             ask.Text, results.Count, requestCharge);
 
         // The charge on the span too, so a trace shows what the Ask cost, not only how long it took

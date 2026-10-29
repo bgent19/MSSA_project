@@ -1,4 +1,4 @@
-using MeepleLedger.Domain;
+﻿using MeepleLedger.Domain;
 
 namespace MeepleLedger.Tests
 {
@@ -99,6 +99,96 @@ namespace MeepleLedger.Tests
 
             Assert.Empty(log.RecentFirst());
             Assert.True(collection.Owns("Catan"));
+        }
+
+        [Fact]
+        public void PlayLog_Record_AcceptsTheOwnerTypedWithOddCaseAndSpaces()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var log = new PlayLog { OwnerName = "TheGentleBean" };
+            var play = new Play(catan, DateTime.Today, [new PlayerResult { PlayerName = " thegentlebean " }]);
+
+            log.Record(play);
+
+            Assert.Single(log.RecentFirst());
+        }
+
+        [Fact]
+        public void PlayLog_Replace_AcceptsTheOwnerTypedWithOddCaseAndSpaces()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var log = new PlayLog { OwnerName = "TheGentleBean" };
+            var original = new Play(catan, new DateTime(2026, 1, 1), [new PlayerResult { PlayerName = "TheGentleBean" }]);
+            log.Record(original);
+
+            var edited = new Play(catan, new DateTime(2026, 1, 2), [new PlayerResult { PlayerName = " thegentlebean " }]) { Id = original.Id };
+            log.Replace(edited);
+
+            Assert.Same(edited, log.Get(original.Id));
+        }
+
+        [Fact]
+        public void Play_IsWonBy_MatchesTheNameIgnoringCase()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var play = new Play(catan, DateTime.Today,
+            [
+                new PlayerResult { PlayerName = "Tom", IsWinner = true },
+                new PlayerResult { PlayerName = "Sam" },
+            ]);
+
+            Assert.True(play.IsWonBy("tom"));
+            Assert.False(play.IsWonBy("sam"));
+        }
+
+        [Fact]
+        public void Play_Constructor_RejectsTheSamePlayerTwice()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            List<PlayerResult> results =
+            [
+                new PlayerResult { PlayerName = "Tom" },
+                new PlayerResult { PlayerName = "tom " },
+            ];
+
+            Assert.Throws<ArgumentException>(() => new Play(catan, DateTime.Today, results));
+        }
+
+        [Fact]
+        public void Play_Constructor_TrimsNames()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var play = new Play(catan, DateTime.Today, [new PlayerResult { PlayerName = "  Tom " }]);
+
+            Assert.Equal("Tom", play.Results[0].PlayerName);
+        }
+
+        [Fact]
+        public void PlayLog_WinRecordFor_MergesBothSpellingsOfThePlayer()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var log = new PlayLog { OwnerName = "Brett" };
+            log.Record(new Play(catan, new DateTime(2026, 1, 1), [new PlayerResult { PlayerName = "Brett", IsWinner = true }]));
+            log.Record(new Play(catan, new DateTime(2026, 1, 2), [new PlayerResult { PlayerName = "brett ", IsWinner = true }]));
+            log.Record(new Play(catan, new DateTime(2026, 1, 3), [new PlayerResult { PlayerName = "BRETT" }]));
+
+            var record = log.WinRecordFor(catan);
+
+            Assert.Equal(2, record.Wins);
+            Assert.Equal(3, record.Plays);
+        }
+
+        [Fact]
+        public void PlayLog_KnownPlayers_ListsEachPlayerOnceWithTheMostRecentSpelling()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var log = new PlayLog { OwnerName = "Brett" };
+            log.Record(new Play(catan, new DateTime(2026, 1, 1),
+                [new PlayerResult { PlayerName = "Brett" }, new PlayerResult { PlayerName = "tom" }]));
+            log.Record(new Play(catan, new DateTime(2026, 1, 2),
+                [new PlayerResult { PlayerName = "Brett" }, new PlayerResult { PlayerName = "Tom" }]));
+
+            Assert.Equal(["Brett", "Tom"], log.KnownPlayers());
         }
     }
 }

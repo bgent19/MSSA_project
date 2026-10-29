@@ -50,7 +50,7 @@ else
         {
             var isOwner = r == _results[0];
             <tr @key="r">
-                <td><input class="form-control"               @bind="r.PlayerName" disabled="@isOwner" /></td>
+                <td><input class="form-control" list="known-players" @bind="r.PlayerName" disabled="@isOwner" /></td>
                 <td><input class="form-control" type="number" @bind="r.Score"                          /></td>
                 <td><input class="form-check-input" type="checkbox" @bind="r.IsWinner"                 /></td>
                 <td>
@@ -63,6 +63,12 @@ else
         }
     </tbody>
 </table>
+<datalist id="known-players">
+    @foreach (var name in _knownPlayers)
+    {
+        <option value="@name"></option>
+    }
+</datalist>
 <button class="btn btn-outline-secondary mb-3 me-2" @onclick="AddPlayer">Add player</button>
 
 @if (_error is not null)
@@ -90,6 +96,7 @@ else
     private int? _duration;
     private string? _location;
     private List<PlayerResult> _results = [];  // row 0 is always the owner
+    private List<string> _knownPlayers = [];   // suggestions for the name boxes
     private string? _error;
     private string? _confirmation;
 
@@ -113,8 +120,9 @@ else
         _date = play.PlayedOn;
         _duration = play.DurationMinutes;
         _location = play.Location;
+        _knownPlayers = Store.PlayLog.KnownPlayers();
         _results = [.. play.Results
-            .OrderByDescending(r => r.PlayerName == Store.PlayLog.OwnerName)
+            .OrderByDescending(r => PlayerNames.AreSame(r.PlayerName, Store.PlayLog.OwnerName))
             .Select(r => new PlayerResult { PlayerName = r.PlayerName, Score = r.Score, IsWinner = r.IsWinner })];
     }
 
@@ -125,6 +133,7 @@ else
         _duration = null;
         _location = null;
         _results = [ new PlayerResult { PlayerName = Store.PlayLog.OwnerName } ];
+        _knownPlayers = Store.PlayLog.KnownPlayers();
     }
 
     private void AddPlayer() => _results.Add(new PlayerResult { PlayerName = "" });
@@ -158,6 +167,13 @@ else
         catch (ArgumentOutOfRangeException)
         {
             _error = $"{_game.Name} seats at most {_game.MaxPlayers} players - you have {results.Count}.";
+            return;
+        }
+        catch (ArgumentException ex)
+        {
+            // Same Player twice, e.g. "Tom" and "tom". Caught after ArgumentOutOfRangeException,
+            // which is also an ArgumentException.
+            _error = ex.Message;
             return;
         }
         catch(InvalidOperationException ex)

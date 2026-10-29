@@ -1,0 +1,9 @@
+{
+  "defaultLanguage": "en-US",
+  "fullTextPaths": [
+    {
+      "path": "/facts",
+      "language": "en-US"
+    }
+  ]
+}

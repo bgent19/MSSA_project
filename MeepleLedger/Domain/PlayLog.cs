@@ -41,7 +41,7 @@
 
         private void RequireOwner(Play p)
         {
-            if(!p.Results.Exists(pr => pr.PlayerName == OwnerName))
+            if(!p.Results.Exists(pr => PlayerNames.AreSame(pr.PlayerName, OwnerName)))
             {
                 throw new InvalidOperationException("You must be recorded in a game you wish to log.");
             }
@@ -66,6 +66,36 @@
         {
             var plays = ForGame(g).ToList();
             return new WinRecord(plays.Count(p => p.IsWonBy(OwnerName)), plays.Count);
+        }
+
+        // One name per Player in the log, spelled as in their most recent Play, sorted by name.
+        // "Tom" and "tom" count as one Player, so only one of them comes back.
+        public List<string> KnownPlayers()
+        {
+            List<string> names = [];
+            foreach (var play in RecentFirst())
+            {
+                foreach (var result in play.Results)
+                {
+                    bool alreadyListed = false;
+                    foreach (var name in names)
+                    {
+                        if (PlayerNames.AreSame(name, result.PlayerName))
+                        {
+                            alreadyListed = true;
+                            break;
+                        }
+                    }
+
+                    if (!alreadyListed)
+                    {
+                        names.Add(result.PlayerName);
+                    }
+                }
+            }
+
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            return names;
         }
 
         public IEnumerable<Game> MostPlayed()
