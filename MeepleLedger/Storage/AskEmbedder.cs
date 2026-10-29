@@ -38,11 +38,18 @@ public class AskEmbedder
         _lastKey = ReadKey();
     }
 
-    public async Task<float[]> EmbedAsync(string text)
+    public Task<float[]> EmbedAsync(string text)
+    {
+        return EmbedAsync(text, "Embed the Ask");
+    }
+
+    // The same call with another span name, for embedding something that isn't an Ask: a Game
+    // added from BoardGameGeek (S-07) is embedded with the same deployment as the Seeder's Blurbs.
+    public async Task<float[]> EmbedAsync(string text, string spanName)
     {
         // A-31: the HttpClient call below gets its own span from OpenTelemetry's HTTP
         // instrumentation; this span names the step around it.
-        using Activity? span = SearchTelemetry.Source.StartActivity("Embed the Ask");
+        using Activity? span = SearchTelemetry.Source.StartActivity(spanName);
 
         string key = ReadKey();
         if (key != _lastKey)
@@ -64,7 +71,7 @@ public class AskEmbedder
         {
             span?.SetStatus(ActivityStatusCode.Error, "Azure OpenAI answered " + (int)response.StatusCode);
             throw new HttpRequestException(
-                "Embedding the Ask failed: " + (int)response.StatusCode + " " + response.StatusCode + ". " + responseText);
+                "Embedding failed: " + (int)response.StatusCode + " " + response.StatusCode + ". " + responseText);
         }
 
         // Response shape: { "data": [ { "embedding": [ ...floats... ] } ], "usage": { "total_tokens": n } }

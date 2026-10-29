@@ -163,20 +163,31 @@ builder.Services.AddRazorComponents()
 // from the FeatureManagement section of appsettings.json, where Tonight is on.
 builder.Services.AddFeatureManagement();
 
-builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
-
 // Where the Collection and the Play Log live (S-04). InMemory is the default and needs nothing
 // (ADR-0001): the Seed, gone at every restart. Cosmos keeps them in the Cosmos:OwnedGamesContainer
 // and Cosmos:PlaysContainer containers and needs the Cosmos:* settings. Read once at startup: unlike
 // the Search Index Provider, switching the store needs a restart.
 // Pick it with: dotnet run --project MeepleLedger -- --MeepleStore:Provider=Cosmos
+//
+// The Catalog follows the store (S-07): the compiled CatalogSeed with the in-memory store, and the
+// Cosmos games container with the Cosmos store, so a Game added from BoardGameGeek is still there
+// after a restart and the stored Owned Games and Plays can name it.
 string meepleStoreProvider = builder.Configuration["MeepleStore:Provider"] ?? "InMemory";
 if (meepleStoreProvider == "InMemory")
 {
+    builder.Services.AddSingleton<IGameCatalogSource, SeededCatalogSource>();
     builder.Services.AddSingleton<IMeepleStore, InMemoryMeepleStore>();
 }
 else if (meepleStoreProvider == "Cosmos")
 {
+    // The embedder is passed as a function so it is only built when a Game is added: the store
+    // starts with just the Cosmos:* settings, and adding a Game is what needs AzureOpenAI:*.
+    builder.Services.AddSingleton<IGameCatalogSource>(services => new CosmosGameCatalogSource(
+        services.GetRequiredService<CosmosClient>(),
+        () => services.GetRequiredService<AskEmbedder>(),
+        services.GetRequiredService<IConfiguration>(),
+        services.GetRequiredService<ILogger<CosmosGameCatalogSource>>()));
+
     // Takes the app's one CosmosClient (registered below), so the Cosmos key is read once.
     builder.Services.AddSingleton<IMeepleStore, CosmosMeepleStore>();
 }
@@ -267,6 +278,10 @@ builder.Services.AddSingleton(services => new AskEmbedder(
     appConfig,
     services.GetRequiredService<ILogger<AskEmbedder>>()));
 
+// Finds a Game on BoardGameGeek for "Add from BoardGameGeek" (S-07). Needs Bgg:Token only when used;
+// without it the page says lookup isn't set up.
+builder.Services.AddSingleton<BggClient>();
+
 builder.Services.AddSingleton<InMemoryGameSearchIndex>();
 builder.Services.AddSingleton<CosmosGameSearchIndex>();
 builder.Services.AddSingleton<PostgresGameSearchIndex>();
@@ -345,7 +360,7 @@ if (keyVaultEnabled)
 
 if (appConfigEnabled || keyVaultEnabled)
 {
-    string[] settingsToTrace = { SwitchingGameSearchIndex.ProviderSetting, "MeepleStore:Provider", "AzureOpenAI:Key", "Cosmos:Key", "Postgres:ConnectionString", "Redis:ConnectionString", "EventGrid:TopicKey" };
+    string[] settingsToTrace = { SwitchingGameSearchIndex.ProviderSetting, "MeepleStore:Provider", "AzureOpenAI:Key", "Cosmos:Key", "Postgres:ConnectionString", "Redis:ConnectionString", "EventGrid:TopicKey", BggClient.TokenSetting };
     foreach (string name in settingsToTrace)
     {
         app.Logger.LogInformation("  {Setting} is read from {Source}", name, SettingSource(builder.Configuration, name));

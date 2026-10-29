@@ -34,6 +34,8 @@ namespace MeepleLedger.Storage;
 //     whether it is on your shelf). Each entry's key is written into "tag" sets as it is cached:
 //     one set for owned-only entries and one per Game. Invalidation reads a set and deletes the
 //     keys in it. Never KEYS: it walks the whole keyspace and blocks the server while it does.
+//   - A Game added to the Catalog (S-07): it can belong in any answer, so the generation goes up,
+//     the same as for an edited Blurb below.
 //   - A Blurb edited: the Game gets a new vector, which can move it into or out of ANY cached
 //     answer, so every entry is affected. Rather than find and delete them all, every key carries
 //     a generation number (GenerationKey). The Seeder raises it (watch-cosmos on any change to a
@@ -86,6 +88,7 @@ public class CachedGameSearchIndex : IGameSearchIndex
         _logger = logger;
 
         store.Collection.Changed += OnCollectionChanged;
+        catalogSource.Catalog.Added += OnCatalogGameAdded;
     }
 
     // The cache does not change what the Search Index can do.
@@ -309,6 +312,29 @@ public class CachedGameSearchIndex : IGameSearchIndex
         // An event handler cannot be awaited, so the Redis work runs on its own. It catches and
         // logs its own errors, so nothing is left unobserved.
         _ = InvalidateForCollectionChangeAsync(gameName);
+    }
+
+    // A Game added to the Catalog (S-07) can belong in ANY cached answer, like a Blurb edit, so the
+    // generation goes up and no old key is looked up again.
+    private void OnCatalogGameAdded(string gameName)
+    {
+        Interlocked.Increment(ref _collectionVersion);
+        _ = RaiseGenerationAsync(gameName);
+    }
+
+    private async Task RaiseGenerationAsync(string gameName)
+    {
+        try
+        {
+            await _redis.GetDatabase().StringIncrementAsync(GenerationKey);
+            _logger.LogInformation("Recommendation cache: {Game} was added to the Catalog, so every cached answer is dropped", gameName);
+        }
+        catch (Exception ex) when (IsRedisFailure(ex))
+        {
+            _logger.LogWarning(
+                "Recommendation cache: could not drop cached answers after {Game} was added to the Catalog; entries end with their TTL. {Message}",
+                gameName, ex.Message);
+        }
     }
 
     private async Task InvalidateForCollectionChangeAsync(string gameName)

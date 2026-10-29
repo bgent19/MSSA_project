@@ -265,6 +265,7 @@ $secretReferences = [ordered]@{
     "Postgres:ConnectionString" = "Postgres--ConnectionString"
     "Redis:ConnectionString" = "Redis--ConnectionString"
     "EventGrid:TopicKey" = "EventGrid--TopicKey"
+    "Bgg:Token" = "Bgg--Token"
 }
 $vaultSecretNames = az keyvault secret list --vault-name $vaultName --query "[].name" -o tsv
 Test-LastCommand "list the secrets in $vaultName (you need Key Vault Secrets Officer: provision-keyvault.ps1)"

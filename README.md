@@ -39,7 +39,7 @@ below if you want to regenerate them.
 | Page | Route | What it does |
 |---|---|---|
 | Collection | `/` | Lists the games you own. Search by title or designer, filter by player count. |
-| Add a Game | `/collection/add` | Pick a game from the catalog and add it with its condition and date acquired. A game you already own is refused. |
+| Add a Game | `/collection/add` | Pick a game from the catalog and add it with its condition and date acquired. A game you already own is refused. A game the catalog doesn't have can be found on BoardGameGeek ("Not in the list? Add from BoardGameGeek", also on Log a Play; needs a `Bgg:Token` setting). On the Cosmos store it is kept in the `games` container and embedded at once, so Tonight can recommend it; on the in-memory store it lasts until the app restarts. |
 | Game detail | `/games/{name}` | One game's details, its plays, and your win rate for it. |
 | Log a Play | `/log` | Record a session: pick any catalog game (owned or not), then the date, players, scores, winners, duration and location. |
 | Edit a Play | `/plays/{id}/edit` | The same form, filled in with an existing play. |

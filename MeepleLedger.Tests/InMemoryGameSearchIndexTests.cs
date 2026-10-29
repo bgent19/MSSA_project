@@ -191,6 +191,12 @@ namespace MeepleLedger.Tests
             {
                 Catalog = new GameCatalog(games);
             }
+
+            public Task AddGameAsync(Game game)
+            {
+                Catalog.Add(game);
+                return Task.CompletedTask;
+            }
         }
 
         private class FakeStore : IMeepleStore

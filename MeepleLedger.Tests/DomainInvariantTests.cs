@@ -18,6 +18,50 @@ namespace MeepleLedger.Tests
         }
 
         [Fact]
+        public void GameCatalog_Add_RejectsANameAlreadyInTheCatalog()
+        {
+            var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };
+            var catalog = new GameCatalog([catan]);
+
+            // A different Game object with the same name is still the same Game to the Collection.
+            var reprint = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 6 };
+
+            var ex = Assert.Throws<InvalidOperationException>(() => catalog.Add(reprint));
+            Assert.Contains("Catan", ex.Message);
+            Assert.Single(catalog.Games);
+            Assert.Same(catan, catalog.Find("Catan"));
+        }
+
+        [Fact]
+        public void GameCatalog_Add_PutsTheGameInTheCatalogAndSaysSo()
+        {
+            var catalog = new GameCatalog([new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 }]);
+            var cascadia = new Game { Name = "Cascadia", MinPlayers = 1, MaxPlayers = 4 };
+            string? added = null;
+            catalog.Added += name => added = name;
+
+            catalog.Add(cascadia);
+
+            Assert.Equal(2, catalog.Games.Count);
+            Assert.Same(cascadia, catalog.Find("Cascadia"));
+            Assert.Single(catalog.Search("casc"));
+            Assert.Equal("Cascadia", added);
+        }
+
+        [Fact]
+        public void GameCatalog_Add_LeavesAListAlreadyHandedOutAlone()
+        {
+            // A page looping over Games on another circuit must not see the list change under it.
+            var catalog = new GameCatalog([new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 }]);
+            IReadOnlyList<Game> before = catalog.Games;
+
+            catalog.Add(new Game { Name = "Cascadia", MinPlayers = 1, MaxPlayers = 4 });
+
+            Assert.Single(before);
+            Assert.Equal(2, catalog.Games.Count);
+        }
+
+        [Fact]
         public void GameCollection_Replace_SwapsInTheEditedOwnedGame()
         {
             var catan = new Game { Name = "Catan", MinPlayers = 3, MaxPlayers = 4 };

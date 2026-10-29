@@ -1,0 +1,220 @@
+@* "Not in the list? Add from BoardGameGeek" (S-07): type a name, see BGG's matches, pick one, check
+   its facts, confirm. The Game goes into the Catalog (and on the Cosmos store into the games
+   container, embedded), and OnGameAdded hands it to the page as if it had been picked.
+   Used inside interactive pages (Add a Game, Log a Play), so it takes their render mode. *@
+@inject BggClient Bgg
+@inject IGameCatalogSource CatalogSource
+
+@code {
+    [Parameter] public EventCallback<Game> OnGameAdded { get; set; }
+
+    private bool _open;
+    private bool _busy;          // a call to BGG (or the save) is running; the buttons wait for it
+    private string _name = "";
+    private List<BggMatch>? _matches;
+    private Game? _found;        // the facts of the match that was picked, waiting for confirm
+    private string? _error;
+
+    // The same Game is already in the Catalog: offer it instead of a second copy.
+    private Game? AlreadyInCatalog => _found is null ? null : CatalogSource.Catalog.Find(_found.Name);
+
+    private void Open()
+    {
+        _open = true;
+        _error = null;
+    }
+
+    private void Close()
+    {
+        _open = false;
+        _name = "";
+        _matches = null;
+        _found = null;
+        _error = null;
+    }
+
+    private async Task Search()
+    {
+        _error = null;
+        _matches = null;
+        _found = null;
+
+        if (string.IsNullOrWhiteSpace(_name))
+        {
+            _error = "Type the game's name first.";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _matches = await Bgg.SearchAsync(_name);
+        }
+        catch (BggLookupException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task Pick(BggMatch match)
+    {
+        // A list row can't be disabled like a button, so a second click while BGG answers is ignored here.
+        if (_busy)
+        {
+            return;
+        }
+
+        _error = null;
+        _busy = true;
+        try
+        {
+            _found = await Bgg.FetchGameAsync(match.Id);
+        }
+        catch (BggLookupException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task Confirm()
+    {
+        if (_found is null)
+        {
+            return;
+        }
+
+        _error = null;
+        _busy = true;
+        try
+        {
+            // The catalog source checks the name is new, then stores the Game (on Cosmos: embeds it
+            // and writes it), and only then puts it in the Catalog.
+            await CatalogSource.AddGameAsync(_found);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+            return;
+        }
+        catch (StoreWriteException ex)
+        {
+            _error = ex.Message;
+            return;
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        Game added = _found;
+        Close();
+        await OnGameAdded.InvokeAsync(added);
+    }
+
+    private async Task UseExisting(Game game)
+    {
+        Close();
+        await OnGameAdded.InvokeAsync(game);
+    }
+
+    private static string YearText(BggMatch match) => match.Year is int year && year != 0 ? $"({year})" : "(year unknown)";
+
+    private static string WeightText(Game game) => game.Weight is double weight ? weight.ToString("0.0") + " / 5" : "unrated";
+}
+
+@if (!_open)
+{
+    <p class="mt-1 mb-3">
+        <button class="btn btn-link btn-sm p-0" @onclick="Open">Not in the list? Add from BoardGameGeek</button>
+    </p>
+}
+else
+{
+    <div class="card card-body mt-2 mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong>Add from BoardGameGeek</strong>
+            <button class="btn btn-link btn-sm" @onclick="Close">close</button>
+        </div>
+
+        @if (!Bgg.IsConfigured)
+        {
+            <p class="text-muted mb-0">BoardGameGeek lookup isn't set up here: there is no @BggClient.TokenSetting setting.</p>
+        }
+        else
+        {
+            <div class="input-group mb-2">
+                <input class="form-control" placeholder="Name on BoardGameGeek..." @bind="_name" disabled="@_busy" />
+                <button class="btn btn-outline-primary" @onclick="Search" disabled="@_busy">Search</button>
+            </div>
+
+            @if (_busy)
+            {
+                <p class="text-muted">Asking BoardGameGeek...</p>
+            }
+
+            @if (_error is not null)
+            {
+                <div class="alert alert-danger mb-2">@_error</div>
+            }
+
+            @if (_found is not null)
+            {
+                <div class="chosen-game mb-2">
+                    <strong>@_found.Name</strong>
+                    <small class="text-muted">
+                        — @_found.Designer · @_found.MinPlayers–@_found.MaxPlayers players · @_found.PlaytimeMinutes min · weight @WeightText(_found)
+                    </small>
+                    @if (_found.Categories.Count > 0)
+                    {
+                        <div><small>Categories: @string.Join(", ", _found.Categories)</small></div>
+                    }
+                    @if (_found.Mechanics.Count > 0)
+                    {
+                        <div><small>Mechanics: @string.Join(", ", _found.Mechanics)</small></div>
+                    }
+                </div>
+
+                @if (AlreadyInCatalog is Game existing)
+                {
+                    <p>@existing.Name is already in the Catalog.</p>
+                    <button class="btn btn-primary btn-sm" @onclick="() => UseExisting(existing)">Use @existing.Name</button>
+                }
+                else
+                {
+                    <button class="btn btn-primary btn-sm" @onclick="Confirm" disabled="@_busy">Add @_found.Name to the Catalog</button>
+                }
+                <button class="btn btn-link btn-sm" @onclick="() => _found = null" disabled="@_busy">back to the matches</button>
+            }
+            else if (_matches is not null)
+            {
+                @if (_matches.Count == 0)
+                {
+                    <p class="text-muted mb-0">BoardGameGeek has no board game called "@_name".</p>
+                }
+                else
+                {
+                    <ul class="list-group">
+                        @foreach (BggMatch match in _matches.Take(BggClient.MaxMatches))
+                        {
+                            <li class="list-group-item list-group-item-action" @key="match.Id" @onclick="() => Pick(match)">
+                                @match.Name <small class="text-muted">@YearText(match)</small>
+                            </li>
+                        }
+                        @if (_matches.Count > BggClient.MaxMatches)
+                        {
+                            <li class="list-group-item text-muted">@(_matches.Count - BggClient.MaxMatches) more - type more of the name</li>
+                        }
+                    </ul>
+                }
+            }
+        }
+    </div>
+}

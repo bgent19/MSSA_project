@@ -110,7 +110,19 @@ public class CosmosGameSearchIndex : IGameSearchIndex
 
         foreach (SearchResult result in results)
         {
-            Game game = FindGame(result.Id);
+            Game? game = _catalogSource.Catalog.Find(result.Id);
+            if (game == null)
+            {
+                // A Game added at runtime (S-07) while this app runs on the compiled Catalog
+                // (MeepleStore:Provider=InMemory). The two Catalogs drift by design (ADR-0005), so it
+                // is left out rather than failing the Ask. With the Cosmos store the Catalog is read
+                // from the same container and this doesn't happen.
+                _logger.LogWarning(
+                    "Cosmos returned '{Game}', which is not in this app's Catalog; left out. If it should be, run: dotnet run --project MeepleLedger.Seeder -- upload-cosmos",
+                    result.Id);
+                continue;
+            }
+
             string reason = BuildReason(game, askWords, table);
             recommendations.Add(new Recommendation(game, recommendations.Count + 1, reason));
         }
@@ -243,22 +255,6 @@ public class CosmosGameSearchIndex : IGameSearchIndex
         }
 
         return names;
-    }
-
-    // Document ids are Game names. A name that is not in the Catalog means the container is out of
-    // date with the seed; fail loudly rather than quietly return fewer Recommendations.
-    private Game FindGame(string name)
-    {
-        foreach (Game game in _catalogSource.Catalog.Games)
-        {
-            if (game.Name == name)
-            {
-                return game;
-            }
-        }
-
-        throw new InvalidOperationException(
-            "Cosmos returned '" + name + "', which is not in the Catalog. Run: dotnet run --project MeepleLedger.Seeder -- upload-cosmos");
     }
 
     // The Reason names the categories and mechanics behind the match, never the raw distance,

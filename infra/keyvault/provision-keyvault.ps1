@@ -20,6 +20,8 @@
 #   Postgres--ConnectionString     with the password in it (only if the user secret exists)
 #   Redis--ConnectionString        with the access key in it (only if the user secret exists)
 #   EventGrid--TopicKey            (only if the user secret exists)
+#   Bgg--Token                     the BoardGameGeek API token for "Add from BoardGameGeek" (S-07; only if
+#                                  the user secret Bgg:Token exists). A production secret: never an app setting
 #
 # Who reads them: each app's own provisioning script grants its identity "Key Vault Secrets User" on
 # this vault (provision-appservice.ps1, provision-containerapps.ps1 / use-keyvault.ps1,
@@ -184,6 +186,7 @@ $optionalSecrets = [ordered]@{
     "Postgres:ConnectionString" = "Postgres--ConnectionString"
     "Redis:ConnectionString" = "Redis--ConnectionString"
     "EventGrid:TopicKey" = "EventGrid--TopicKey"
+    "Bgg:Token" = "Bgg--Token"
 }
 foreach ($settingName in $optionalSecrets.Keys) {
     if ($secrets.ContainsKey($settingName) -and -not [string]::IsNullOrWhiteSpace($secrets[$settingName])) {

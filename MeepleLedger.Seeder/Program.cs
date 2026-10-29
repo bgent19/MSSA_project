@@ -661,8 +661,12 @@ static async Task<int> SeedLedger()
 // ownedGames and plays containers. Every row goes through the domain classes first (LedgerExport.Load:
 // GameCollection.Add, PlayLog.Record), and nothing is written if any row breaks an invariant. It
 // refuses a store that isn't empty: an import never merges into or overwrites real data.
-// With a scratch database name it imports there instead, creating the database and the two containers
-// if they don't exist, for the round-trip check. Metered: two count queries and one write per row.
+// Games added at runtime (S-07) are written into the games container first, embedded, unless it has
+// them already.
+// With a scratch database name it imports there instead, creating the database and the three
+// containers if they don't exist (games as a copy of the real one, so the app pointed at it has the
+// whole Catalog), for the round-trip check. Metered: two count queries and one write per row, one
+// embeddings call if any added Game is missing, and the copy of games for a scratch database.
 static async Task<int> ImportLedger(string path, string? scratchDatabase)
 {
     // The same owner as InMemoryMeepleStore, CosmosMeepleStore.OwnerName and EmitLog; they must match
@@ -696,14 +700,20 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
         return 1;
     }
 
-    // TODO S-07: a Game added at runtime is in file.Games with its full facts, and Load has already put
-    // it in the Catalog it checked the rows against. Writing it into the Cosmos games container (with
-    // its vector and embeddingTextHash) before the rows that use it belongs to S-07, which is where the
-    // live Catalog starts being loaded from that container. Until then such a file is refused.
-    if (file.Games.Count > 0)
+    // Games added at runtime (S-07) are in file.Games with their full facts, and Load has already put
+    // them in the Catalog it checked the rows against. They go into the games container (embedded,
+    // with embeddingTextHash) before the rows that use them, so the app's Catalog can find them.
+    List<Game> addedGames = [];
+    foreach (ExportedGame exported in file.Games)
     {
-        Console.WriteLine($"The file has {file.Games.Count} Games outside the compiled Catalog. Restoring them needs S-07. Nothing was written.");
-        return 1;
+        // The id is the Game's name, and Cosmos refuses an id with these in it
+        if (exported.Name.IndexOfAny(['/', '\\', '?', '#']) >= 0)
+        {
+            Console.WriteLine($"The file's Game '{exported.Name}' can't be a Cosmos id: it contains / \\ ? or #. Nothing was written.");
+            return 1;
+        }
+
+        addedGames.Add(ledger.Catalog.Find(exported.Name)!);
     }
 
     // Build the documents from the domain objects, not from the file's rows, so what is written is
@@ -732,6 +742,7 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
     Console.WriteLine($"File:            {path}");
     Console.WriteLine($"Exported on:     {file.ExportedOn} (format version {file.FormatVersion})");
     Console.WriteLine($"Checked:         {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays, every row valid");
+    Console.WriteLine($"Added Games:     {addedGames.Count} outside the compiled Catalog");
     Console.WriteLine();
 
     // 2. Where it goes. Environment variables are read too (Cosmos__Database=...), after user secrets
@@ -760,6 +771,8 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
     // The web app reads these names from its appsettings.json; a user secret can override them here
     string ownedGamesName = config["Cosmos:OwnedGamesContainer"] ?? "ownedGames";
     string playsName = config["Cosmos:PlaysContainer"] ?? "plays";
+    string gamesName = config["Cosmos:Container"] ?? "games";
+    string realDatabaseName = databaseName;
 
     // camelCase, the same as the web app's CosmosClient, so "ownerName" matches the partition key path
     CosmosClientOptions options = new CosmosClientOptions
@@ -788,6 +801,7 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
 
     Container ownedGamesContainer = client.GetContainer(databaseName, ownedGamesName);
     Container playsContainer = client.GetContainer(databaseName, playsName);
+    Container gamesContainer = client.GetContainer(databaseName, gamesName);
 
     // The account name is the first part of the endpoint's host, e.g. meepleledger-cosmos
     string accountName = new Uri(endpoint).Host.Split('.')[0];
@@ -801,7 +815,7 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
     {
         Console.WriteLine($"Database:        {databaseName}");
     }
-    Console.WriteLine($"Containers:      {ownedGamesName}, {playsName}");
+    Console.WriteLine($"Containers:      {ownedGamesName}, {playsName}, {gamesName}");
     Console.WriteLine();
 
     // 3. Refuse a store that isn't empty. There is no --force: empty both containers by hand first
@@ -817,6 +831,14 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
     }
 
     Console.WriteLine($"About to write {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays for {ownerName}.");
+    if (scratchDatabase != null)
+    {
+        Console.WriteLine($"The scratch {gamesName} container is filled with a copy of {realDatabaseName}/{gamesName} first, so the app pointed at it has the whole Catalog.");
+    }
+    if (addedGames.Count > 0)
+    {
+        Console.WriteLine($"Any of the {addedGames.Count} added Games not already in {gamesName} is embedded (one embeddings call) and written there first.");
+    }
     Console.Write("Continue? [y/N] ");
 
     if (Console.ReadLine()?.Trim().ToLower() != "y")
@@ -825,7 +847,49 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
         return 0;
     }
 
-    // 4. Write. Create, not upsert: the containers were empty, so a conflict means someone else is writing too
+    // 4. The Catalog. A scratch database gets its own games container, a copy of the real one, so the
+    //    app pointed at it (MeepleStore:Provider=Cosmos reads the Catalog from there) has every Game
+    if (scratchDatabase != null)
+    {
+        totalCharge += await CopyGamesToScratch(client, realDatabaseName, scratchDatabase, gamesName);
+    }
+
+    // Then the added Games the games container doesn't have yet. One already there (it survives a
+    // wiped store) is left alone: it may have been embedded from a newer Blurb.
+    List<Game> gamesToWrite = [];
+    foreach (Game game in addedGames)
+    {
+        try
+        {
+            ItemResponse<CosmosGameDocument> existing = await gamesContainer.ReadItemAsync<CosmosGameDocument>(game.Name, new PartitionKey(game.Name));
+            totalCharge += existing.RequestCharge;
+            Console.WriteLine($"[Game] {game.Name} is already in {gamesName}, kept");
+        }
+        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            totalCharge += ex.RequestCharge;
+            gamesToWrite.Add(game);
+        }
+    }
+
+    if (gamesToWrite.Count > 0)
+    {
+        List<CosmosGameDocument>? gameDocuments = await EmbedAddedGames(gamesToWrite);
+        if (gameDocuments == null)
+        {
+            Console.WriteLine("Stopped before writing any Owned Game or Play. Run it again once embedding works.");
+            return 1;
+        }
+
+        foreach (CosmosGameDocument document in gameDocuments)
+        {
+            ItemResponse<CosmosGameDocument> response = await gamesContainer.CreateItemAsync(document, new PartitionKey(document.Id));
+            totalCharge += response.RequestCharge;
+            Console.WriteLine($"[Game] {document.Id} embedded and written");
+        }
+    }
+
+    // 5. Write. Create, not upsert: the containers were empty, so a conflict means someone else is writing too
     PartitionKey partitionKey = new PartitionKey(ownerName);
 
     for (int i = 0; i < ownedGameDocuments.Count; i++)
@@ -848,6 +912,147 @@ static async Task<int> ImportLedger(string path, string? scratchDatabase)
     Console.WriteLine($"Wrote {ownedGameDocuments.Count} Owned Games and {playDocuments.Count} Plays into {databaseName}");
     Console.WriteLine($"Total request charge: {totalCharge:0.00} RU");
     return 0;
+}
+
+// Embeds Games added at runtime (S-07) and builds the documents the app's CosmosGameCatalogSource
+// would have written: the same facts as upload-cosmos, the vector, its embeddingTextHash, and
+// addedAtRuntime. One embeddings call for all of them. Returns null (after saying why) if it failed.
+static async Task<List<CosmosGameDocument>?> EmbedAddedGames(List<Game> games)
+{
+    EmbeddingSettings? settings = LoadEmbeddingSettings();
+    if (settings == null)
+    {
+        return null;
+    }
+
+    List<string> texts = [];
+    foreach (Game game in games)
+    {
+        texts.Add(BuildEmbeddingText(game.Name, game.Categories, game.Mechanics, game.Blurb ?? ""));
+    }
+
+    HttpClient http = new();
+    http.DefaultRequestHeaders.Add("api-key", settings.Key);
+
+    string? responseText = await PostWithRetry(http, settings.Url, texts);
+    if (responseText == null)
+    {
+        return null;
+    }
+
+    // Response shape: { "data": [ { "index": i, "embedding": [...] } ] }; index is the position sent
+    float[][] vectors = new float[games.Count][];
+    using (JsonDocument json = JsonDocument.Parse(responseText))
+    {
+        foreach (JsonElement row in json.RootElement.GetProperty("data").EnumerateArray())
+        {
+            int index = row.GetProperty("index").GetInt32();
+            JsonElement embedding = row.GetProperty("embedding");
+
+            float[] vector = new float[embedding.GetArrayLength()];
+            int i = 0;
+            foreach (JsonElement number in embedding.EnumerateArray())
+            {
+                vector[i] = number.GetSingle();
+                i++;
+            }
+
+            vectors[index] = vector;
+        }
+    }
+
+    List<CosmosGameDocument> documents = [];
+    for (int i = 0; i < games.Count; i++)
+    {
+        Game game = games[i];
+        documents.Add(new CosmosGameDocument
+        {
+            Id = game.Name,
+            Name = game.Name,
+            Designer = game.Designer ?? "Unknown",
+            MinPlayers = game.MinPlayers,
+            MaxPlayers = game.MaxPlayers,
+            PlaytimeMinutes = game.PlaytimeMinutes,
+            Categories = [.. game.Categories],
+            Mechanics = [.. game.Mechanics],
+            Facts = BuildFacts(game.Categories, game.Mechanics),
+            Weight = game.Weight,
+            Blurb = game.Blurb,
+            Embedding = vectors[i],
+            EmbeddingTextHash = HashText(texts[i]),
+            AddedAtRuntime = true,
+        });
+    }
+
+    return documents;
+}
+
+// Creates the scratch database's games container with the same vector, indexing and full-text
+// policies as provision-cosmos.ps1 (infra/cosmos/games-*.json; keep them in step), and copies every
+// document of the real games container into it, vectors included. Returns the request charge.
+static async Task<double> CopyGamesToScratch(CosmosClient client, string realDatabaseName, string scratchDatabaseName, string gamesName)
+{
+    double charge = 0;
+
+    ContainerProperties properties = new ContainerProperties(gamesName, "/id");
+
+    Embedding embeddingPath = new Embedding
+    {
+        Path = "/embedding",
+        DataType = VectorDataType.Float32,
+        DistanceFunction = DistanceFunction.Cosine,
+        Dimensions = 1536,
+    };
+    properties.VectorEmbeddingPolicy = new VectorEmbeddingPolicy(new System.Collections.ObjectModel.Collection<Embedding> { embeddingPath });
+
+    properties.FullTextPolicy = new FullTextPolicy
+    {
+        DefaultLanguage = "en-US",
+        FullTextPaths = new System.Collections.ObjectModel.Collection<FullTextPath>
+        {
+            new FullTextPath { Path = "/facts", Language = "en-US" },
+        },
+    };
+
+    IndexingPolicy indexing = new IndexingPolicy
+    {
+        IndexingMode = IndexingMode.Consistent,
+        Automatic = true,
+    };
+    indexing.IncludedPaths.Add(new IncludedPath { Path = "/minPlayers/?" });
+    indexing.IncludedPaths.Add(new IncludedPath { Path = "/maxPlayers/?" });
+    indexing.IncludedPaths.Add(new IncludedPath { Path = "/playtimeMinutes/?" });
+    indexing.ExcludedPaths.Add(new ExcludedPath { Path = "/*" });
+    indexing.VectorIndexes.Add(new VectorIndexPath { Path = "/embedding", Type = VectorIndexType.QuantizedFlat });
+    indexing.FullTextIndexes.Add(new FullTextIndexPath { Path = "/facts" });
+    properties.IndexingPolicy = indexing;
+
+    Database scratch = client.GetDatabase(scratchDatabaseName);
+    ContainerResponse created = await scratch.CreateContainerIfNotExistsAsync(properties);
+    charge += created.RequestCharge;
+
+    Container from = client.GetContainer(realDatabaseName, gamesName);
+    Container to = created.Container;
+    int copied = 0;
+
+    using (FeedIterator<CosmosGameDocument> iterator = from.GetItemQueryIterator<CosmosGameDocument>("SELECT * FROM c"))
+    {
+        while (iterator.HasMoreResults)
+        {
+            FeedResponse<CosmosGameDocument> page = await iterator.ReadNextAsync();
+            charge += page.RequestCharge;
+
+            foreach (CosmosGameDocument document in page)
+            {
+                ItemResponse<CosmosGameDocument> response = await to.UpsertItemAsync(document, new PartitionKey(document.Id));
+                charge += response.RequestCharge;
+                copied++;
+            }
+        }
+    }
+
+    Console.WriteLine($"[Games] copied {copied} Games from {realDatabaseName}/{gamesName} into {scratchDatabaseName}/{gamesName}");
+    return charge;
 }
 
 // How many documents a container holds, and what counting them cost
@@ -1382,7 +1587,8 @@ static string BuildFacts(List<string> categories, List<string> mechanics)
 // so a search for "deck building" can match on the mechanic even if the Blurb never says it.
 // MeepleLedger.Worker and MeepleLedger.Functions (EmbeddingText.Build) have copies that must build
 // exactly the same text, or the hashes differ and every vector they write back looks like an edit
-// to watch-cosmos (A-19). Keep the three in step.
+// to watch-cosmos (A-19). The web app's Storage/EmbeddingText.cs is a fourth copy, for Games added
+// from BoardGameGeek (S-07). Keep all four in step.
 // Lines end in "\r\n" whatever the OS: the hashes were first made on Windows, and AppendLine would
 // use "\n" on Linux (where A-21's Function runs).
 static string BuildEmbeddingText(string name, List<string> categories, List<string> mechanics, string blurb)
@@ -1596,9 +1802,12 @@ static async Task<int> UploadCosmos()
         }
     }
 
-    // Find anything that is not one of these Games, so a search never returns a stray document
+    // Find anything that is not one of these Games, so a search never returns a stray document.
+    // A Game added from BoardGameGeek while the app ran (S-07) is not in the raw XML but is no stray:
+    // it is part of the live Catalog (ADR-0005), so it is kept.
     var strayIds = new List<string>();
-    using (FeedIterator<IdOnly> iterator = container.GetItemQueryIterator<IdOnly>("SELECT c.id FROM c"))
+    int keptRuntimeGames = 0;
+    using (FeedIterator<IdOnly> iterator = container.GetItemQueryIterator<IdOnly>("SELECT c.id, c.addedAtRuntime FROM c"))
     {
         while (iterator.HasMoreResults)
         {
@@ -1607,12 +1816,25 @@ static async Task<int> UploadCosmos()
 
             foreach (IdOnly row in page)
             {
-                if (!uploadedIds.Contains(row.Id))
+                if (uploadedIds.Contains(row.Id))
                 {
-                    strayIds.Add(row.Id);
+                    continue;
                 }
+
+                if (row.AddedAtRuntime == true)
+                {
+                    keptRuntimeGames++;
+                    continue;
+                }
+
+                strayIds.Add(row.Id);
             }
         }
+    }
+
+    if (keptRuntimeGames > 0)
+    {
+        Console.WriteLine($"kept {keptRuntimeGames} Games that were added at runtime (S-07)");
     }
 
     foreach (string strayId in strayIds)
@@ -4009,6 +4231,10 @@ class CosmosGameDocument
     // The change feed handler compares it with the document's current text to tell a real edit
     // from a write that only replaced the vector (A-10).
     public string? EmbeddingTextHash { get; set; }
+
+    // True for a Game added from BoardGameGeek while the app ran (S-07), or restored by import-ledger.
+    // upload-cosmos never deletes these as strays. GameDocument in the web project has the same field.
+    public bool? AddedAtRuntime { get; set; }
 }
 
 // One Owned Game as read from raw/collection-owned.xml (see ReadCollection)
@@ -4093,6 +4319,9 @@ class PgvectorRun
 class IdOnly
 {
     public string Id { get; set; } = "";
+
+    // Only read by upload-cosmos, to keep the Games added at runtime (S-07)
+    public bool? AddedAtRuntime { get; set; }
 }
 
 // What measure-ru records for one query: the charge of the last run, the cheapest and dearest of
