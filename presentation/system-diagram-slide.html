@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>*,*::before,*::after{box-sizing:border-box}*{margin:0}</style>
+<title>MeepleLedger in production</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  /* Same projected-slide theme as code-beat-slide.html: one light ground, high contrast. */
+  :root {
+    --ground:  #F1F3F0;
+    --panel:   #FDFDFC;
+    --edge:    #D5DCD6;
+    --ink:     #14201C;
+    --muted:   #6B7A73;
+    --accent:  #0B5B49;
+    --type:    #2C5578;
+    --guard:   #E8EDE7;
+
+    /* One unit: 1% of the width of a 16:9 stage fitted to the display. */
+    --u: min(1vw, 1.7778vh);
+  }
+
+  html, body {
+    height: 100%;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .stage {
+    width: calc(100 * var(--u));
+    height: calc(56.25 * var(--u));
+    background: var(--ground);
+    padding: calc(4 * var(--u)) calc(5 * var(--u));
+    display: flex;
+    flex-direction: column;
+    gap: calc(2 * var(--u));
+  }
+
+  .title {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 600;
+    font-size: calc(4.2 * var(--u));
+    line-height: 1;
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+
+  .title .dot {
+    color: var(--accent);
+  }
+
+  .diagram {
+    flex: 1;
+    min-height: 0;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: calc(0.5 * var(--u));
+    padding: calc(1.6 * var(--u)) calc(2 * var(--u));
+  }
+
+  .diagram svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+  }
+
+  /* Boxes */
+  .box       { fill: var(--panel); stroke: var(--edge); stroke-width: 2; }
+  .box.cloud { fill: #F4F7F9; stroke: #C9D6E0; }
+  .box.app   { fill: #F6FAF8; stroke: var(--accent); stroke-width: 2.5; }
+  .box.layer { fill: var(--panel); stroke: var(--edge); }
+  .box.note  { fill: var(--guard); stroke: none; }
+  .box.band  { fill: var(--guard); stroke: none; }
+
+  .name   { font-size: 21px; font-weight: 600; fill: var(--ink); }
+  .name.big { font-size: 24px; }
+  .detail { font-size: 15px; fill: var(--muted); }
+  .mono   { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 15px; font-weight: 500; fill: var(--type); }
+  .tag    { font-size: 12.5px; font-weight: 600; letter-spacing: 0.08em; fill: var(--accent); text-transform: uppercase; }
+  .edge-label { font-size: 13px; fill: var(--muted); }
+
+  /* Arrows */
+  .flow { fill: none; stroke: var(--muted); stroke-width: 2; }
+  .flow.offline { stroke-dasharray: 6 5; }
+
+  .claim {
+    font-size: calc(1.85 * var(--u));
+    line-height: 1.35;
+    color: var(--muted);
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .claim strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+</style>
+
+</head>
+<body>
+<div class="stage">
+  <h1 class="title">MeepleLedger in production<span class="dot">.</span></h1>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1630 612" role="img" aria-labelledby="diagram-title">
+      <title id="diagram-title">MeepleLedger production diagram (ADR-0004): the owner signs in through Easy Auth to one Container Apps web app, which uses Cosmos DB serverless, Azure OpenAI, Key Vault and Application Insights, and BoardGameGeek to add Games; the Seeder loads Cosmos from the owner's workstation; GitHub Actions builds the image into ghcr.io and deploys it.</title>
+
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#6B7A73"/>
+        </marker>
+      </defs>
+
+      <!-- ===== Column A: people and outside services ===== -->
+      <rect class="box" x="0" y="10" width="260" height="80" rx="8"/>
+      <text class="name" x="20" y="44">Owner</text>
+      <text class="detail" x="20" y="70">phone or browser</text>
+
+      <rect class="box cloud" x="0" y="140" width="260" height="84" rx="8"/>
+      <text class="name" x="20" y="174">Microsoft Entra ID</text>
+      <text class="detail" x="20" y="200">Easy Auth: owner only</text>
+
+      <rect class="box" x="0" y="274" width="260" height="80" rx="8"/>
+      <text class="name" x="20" y="308">BoardGameGeek</text>
+      <text class="detail" x="20" y="334">XML API v2</text>
+
+      <path class="flow" d="M260,50 H328" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="295" y="40" text-anchor="middle">HTTPS</text>
+      <path class="flow" d="M330,182 H262" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="295" y="172" text-anchor="middle">sign-in</text>
+      <path class="flow" d="M330,314 H262" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="295" y="304" text-anchor="middle">lookup</text>
+
+      <!-- ===== Column B: the web app ===== -->
+      <rect class="box app" x="330" y="0" width="500" height="450" rx="10"/>
+      <text class="tag" x="352" y="28">Azure Container Apps</text>
+      <text class="name big" x="352" y="56">MeepleLedger web app</text>
+      <text class="detail" x="352" y="80">scale to zero · max 1 replica · Single revision</text>
+
+      <rect class="box layer" x="350" y="96" width="460" height="64" rx="6"/>
+      <text class="name" x="368" y="122">Pages</text>
+      <text class="detail" x="368" y="146">Collection · Log a Play · Play Log · Tonight · Export</text>
+
+      <rect class="box layer" x="350" y="172" width="460" height="64" rx="6"/>
+      <text class="name" x="368" y="198">Domain: the rules</text>
+      <text class="detail" x="368" y="222">Catalog · Collection · Play Log · Ask · Table</text>
+
+      <rect class="box layer" x="350" y="248" width="460" height="122" rx="6"/>
+      <text class="name" x="368" y="274">Storage: Cosmos Providers</text>
+      <text class="mono" x="368" y="302">CosmosMeepleStore</text>
+      <text class="mono" x="368" y="328">CosmosGameCatalogSource</text>
+      <text class="mono" x="368" y="354">CosmosGameSearchIndex</text>
+
+      <rect class="box note" x="350" y="382" width="460" height="52" rx="6"/>
+      <text class="tag" x="368" y="404">Managed identity</text>
+      <text class="detail" x="368" y="424">reads every secret from Key Vault</text>
+
+      <!-- ===== Column C: Azure services the app calls ===== -->
+      <rect class="box cloud" x="920" y="10" width="360" height="78" rx="8"/>
+      <text class="name" x="940" y="42">Azure OpenAI</text>
+      <text class="detail" x="940" y="68">embeds Asks and added Games</text>
+
+      <rect class="box cloud" x="920" y="110" width="360" height="140" rx="8"/>
+      <text class="tag" x="940" y="136">Serverless</text>
+      <text class="name" x="940" y="162">Cosmos DB</text>
+      <text class="detail" x="940" y="188">games: vector + full-text (hybrid)</text>
+      <text class="detail" x="940" y="212">ownedGames · plays</text>
+      <text class="detail" x="940" y="236">continuous backup, 7 days</text>
+
+      <rect class="box cloud" x="920" y="272" width="360" height="78" rx="8"/>
+      <text class="name" x="940" y="304">Key Vault</text>
+      <text class="detail" x="940" y="330">Cosmos and OpenAI keys · BGG token</text>
+
+      <rect class="box cloud" x="920" y="372" width="360" height="78" rx="8"/>
+      <text class="name" x="940" y="404">Application Insights</text>
+      <text class="detail" x="940" y="430">traces + logs, daily cap</text>
+
+      <path class="flow" d="M830,48 H918" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="874" y="38" text-anchor="middle">embed</text>
+      <path class="flow" d="M830,180 H918" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="874" y="170" text-anchor="middle">store, search</text>
+      <path class="flow" d="M830,310 H918" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="874" y="300" text-anchor="middle">secrets</text>
+      <path class="flow" d="M830,410 H918" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="874" y="400" text-anchor="middle">telemetry</text>
+
+      <!-- ===== Column D: how things get in ===== -->
+      <rect class="box" x="1370" y="110" width="260" height="140" rx="8"/>
+      <text class="tag" x="1390" y="136">Owner's workstation</text>
+      <text class="name" x="1390" y="162">Seeder</text>
+      <text class="detail" x="1390" y="188">upload-cosmos: 200 Games</text>
+      <text class="detail" x="1390" y="212">seed-ledger · import-ledger</text>
+      <text class="detail" x="1390" y="236">run by hand, not hosted</text>
+
+      <path class="flow offline" d="M1370,180 H1282" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="1325" y="170" text-anchor="middle">load</text>
+      <path class="flow offline" d="M1500,110 V48 H1282" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="1390" y="38" text-anchor="middle">embed Blurbs</text>
+
+      <rect class="box" x="1370" y="290" width="260" height="96" rx="8"/>
+      <text class="name" x="1390" y="320">GitHub Actions</text>
+      <text class="detail" x="1390" y="346">PR: build + test</text>
+      <text class="detail" x="1390" y="370">merge: image, deploy (OIDC)</text>
+
+      <rect class="box" x="1370" y="420" width="260" height="70" rx="8"/>
+      <text class="name" x="1390" y="450">ghcr.io</text>
+      <text class="detail" x="1390" y="474">private image, commit tag</text>
+
+      <path class="flow" d="M1500,386 V418" marker-end="url(#arrow)"/>
+      <path class="flow" d="M1370,455 H1320 V520 H580 V452" marker-end="url(#arrow)"/>
+      <text class="edge-label" x="950" y="510" text-anchor="middle">image pull on deploy and cold start (registry token)</text>
+
+      <!-- ===== Boundary band ===== -->
+      <rect class="box band" x="0" y="548" width="1630" height="62" rx="8"/>
+      <text class="tag" x="22" y="585">rg-meepleledger-prod</text>
+      <text class="detail" x="240" y="585">CanNotDelete lock · held to about $5 a month (ADR-0004) · a cold start on the first request of the evening is the accepted price</text>
+    </svg>
+  </div>
+
+  <p class="claim">Only what the app uses: <strong>one container, one serverless database, one embeddings model</strong>. Every other study service stays in the repo, never deployed.</p>
+</div>
+</body>
+</html>
