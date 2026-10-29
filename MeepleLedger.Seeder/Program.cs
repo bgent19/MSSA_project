@@ -52,6 +52,11 @@ if (args.FirstOrDefault() == "upload-cosmos")
     return await UploadCosmos();
 }
 
+if (args.FirstOrDefault() == "seed-ledger")
+{
+    return await SeedLedger();
+}
+
 if (args.FirstOrDefault() == "measure-ru")
 {
     return await MeasureRu();
@@ -441,29 +446,20 @@ static void EmitCollection()
 
     File.WriteAllText(fileName, fileHeader);
 
-
-
-    var file = Directory.GetFiles("raw", "collection-owned.xml");
+    List<SeedOwnedGame> collection = ReadCollection();
     int parsed = 0;
-    
-    var items = XDocument.Load(file[0]).Root!.Elements("item");
 
-    foreach (var item in items)
+    foreach (SeedOwnedGame ownedGame in collection)
     {
         parsed++;
 
-        string name = item.Elements("name").FirstOrDefault()!.Value;
-
-        string[] time = item.Element("status")!
-                            .Attribute("lastmodified")!.Value
-                            .Split(' ')[0]
-                            .Split('-');
+        DateTime acquired = ownedGame.DateAcquired;
 
         File.AppendAllText(fileName, "        " +
-                                    $"new OwnedGame {{ Game = Find(catalog, {Quote(name)}), " +
-                                    $"DateAcquired = new DateTime({int.Parse(time[0])}, {int.Parse(time[1])}, {int.Parse(time[2])}), " +
-                                    $"Condition = Condition.Good, " +
-                                    $"Notes = {Quote("...")} }},{Environment.NewLine}");
+                                    $"new OwnedGame {{ Game = Find(catalog, {Quote(ownedGame.Name)}), " +
+                                    $"DateAcquired = new DateTime({acquired.Year}, {acquired.Month}, {acquired.Day}), " +
+                                    $"Condition = Condition.{ownedGame.Condition}, " +
+                                    $"Notes = {Quote(ownedGame.Notes)} }},{Environment.NewLine}");
     }
 
 
@@ -478,6 +474,165 @@ static void EmitCollection()
 
 
     Console.WriteLine($"Added {parsed} games to collection seed");
+}
+
+// The Collection as it is on BGG, read from raw/collection-owned.xml. EmitCollection writes it into
+// CollectionSeed.cs and seed-ledger (S-05) writes it into the Cosmos store, so both use this one
+// method and can't drift apart. BGG has no condition or notes, so every Owned Game gets the same ones.
+static List<SeedOwnedGame> ReadCollection()
+{
+    var file = Directory.GetFiles("raw", "collection-owned.xml");
+    var items = XDocument.Load(file[0]).Root!.Elements("item");
+
+    List<SeedOwnedGame> collection = [];
+
+    foreach (var item in items)
+    {
+        string name = item.Elements("name").FirstOrDefault()!.Value;
+
+        // lastmodified looks like "2024-03-17 10:22:05"; only the date part is kept
+        string[] time = item.Element("status")!
+                            .Attribute("lastmodified")!.Value
+                            .Split(' ')[0]
+                            .Split('-');
+
+        collection.Add(new SeedOwnedGame
+        {
+            Name = name,
+            DateAcquired = new DateTime(int.Parse(time[0]), int.Parse(time[1]), int.Parse(time[2])),
+            Condition = "Good",
+            Notes = "...",
+        });
+    }
+
+    return collection;
+}
+
+// Copies the real Collection into the durable store's ownedGames container, once (S-05). It writes no
+// Plays: the Seed's Plays are invented, and the durable Play Log starts empty. It refuses if the
+// container already holds anything, so a wiped store is never silently refilled over real edits.
+// Metered: one count query and one write per Owned Game.
+static async Task<int> SeedLedger()
+{
+    // The same owner as InMemoryMeepleStore, CosmosMeepleStore.OwnerName and EmitLog; they must match
+    string ownerName = "TheGentleBean";
+
+    IConfiguration config = new ConfigurationBuilder()
+        .AddUserSecrets<Program>()
+        .Build();
+
+    string? endpoint = config["Cosmos:Endpoint"];
+    string? key = config["Cosmos:Key"];
+    string? databaseName = config["Cosmos:Database"];
+
+    if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(databaseName))
+    {
+        Console.WriteLine("Missing user secrets. Set Cosmos:Endpoint, Cosmos:Key and Cosmos:Database");
+        Console.WriteLine("(pwsh infra/cosmos/provision-cosmos.ps1 sets them).");
+        return 1;
+    }
+
+    // The web app reads this name from its appsettings.json; a user secret can override it here
+    string? containerName = config["Cosmos:OwnedGamesContainer"];
+    if (string.IsNullOrWhiteSpace(containerName))
+    {
+        containerName = "ownedGames";
+    }
+
+    // Build every document before touching Cosmos, so a bad row stops the run with nothing written
+    List<SeedOwnedGame> collection = ReadCollection();
+    List<SeedOwnedGameDocument> documents = [];
+
+    foreach (SeedOwnedGame ownedGame in collection)
+    {
+        // Cosmos ids cannot contain these characters, and the id is the Game name
+        if (ownedGame.Name.IndexOfAny(['/', '\\', '?', '#']) >= 0)
+        {
+            Console.WriteLine($"'{ownedGame.Name}' cannot be a Cosmos id. Nothing was written.");
+            return 1;
+        }
+
+        documents.Add(new SeedOwnedGameDocument
+        {
+            Id = ownedGame.Name,
+            OwnerName = ownerName,
+            GameName = ownedGame.Name,
+            DateAcquired = ownedGame.DateAcquired.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            Condition = ownedGame.Condition,
+            Notes = ownedGame.Notes,
+        });
+    }
+
+    // camelCase, the same as the web app's CosmosClient, so "ownerName" matches the partition key path
+    CosmosClientOptions options = new CosmosClientOptions
+    {
+        SerializerOptions = new CosmosSerializationOptions
+        {
+            PropertyNamingPolicy = CosmosPropertyNamingPolicy.CamelCase,
+        },
+    };
+
+    using CosmosClient client = new CosmosClient(endpoint, key, options);
+    Container container = client.GetContainer(databaseName, containerName);
+
+    // Refuse if anything is already there. There is no --force: to seed again, empty the container by hand.
+    int existing = 0;
+    double totalCharge = 0;
+    using (FeedIterator<int> iterator = container.GetItemQueryIterator<int>("SELECT VALUE COUNT(1) FROM c"))
+    {
+        while (iterator.HasMoreResults)
+        {
+            FeedResponse<int> page = await iterator.ReadNextAsync();
+            totalCharge += page.RequestCharge;
+
+            foreach (int count in page)
+            {
+                existing += count;
+            }
+        }
+    }
+
+    // The account name is the first part of the endpoint's host, e.g. meepleledger-cosmos
+    string accountName = new Uri(endpoint).Host.Split('.')[0];
+
+    Console.WriteLine($"Cosmos account:  {accountName} ({endpoint})");
+    Console.WriteLine($"Database:        {databaseName}");
+    Console.WriteLine($"Container:       {containerName}");
+    Console.WriteLine();
+
+    if (existing > 0)
+    {
+        Console.WriteLine($"Refusing: {containerName} already holds {existing} documents. Nothing was written.");
+        Console.WriteLine("seed-ledger only seeds an empty store. Empty the container by hand to seed it again.");
+        return 1;
+    }
+
+    Console.WriteLine($"About to write {documents.Count} Owned Games for {ownerName}. No Plays are written.");
+    Console.Write("Continue? [y/N] ");
+
+    if (Console.ReadLine()?.Trim().ToLower() != "y")
+    {
+        Console.WriteLine("Stopped. Nothing was written.");
+        return 0;
+    }
+
+    PartitionKey partitionKey = new PartitionKey(ownerName);
+
+    for (int i = 0; i < documents.Count; i++)
+    {
+        SeedOwnedGameDocument document = documents[i];
+
+        // Create, not upsert: the container was empty, so a conflict here means someone else is writing too
+        ItemResponse<SeedOwnedGameDocument> response = await container.CreateItemAsync(document, partitionKey);
+        totalCharge += response.RequestCharge;
+
+        Console.WriteLine($"[{i + 1}/{documents.Count}] {document.Id}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"Wrote {documents.Count} Owned Games into {databaseName}/{containerName}");
+    Console.WriteLine($"Total request charge: {totalCharge:0.00} RU");
+    return 0;
 }
 static void EmitLog()
 {
@@ -3618,6 +3773,27 @@ class CosmosGameDocument
     // The change feed handler compares it with the document's current text to tell a real edit
     // from a write that only replaced the vector (A-10).
     public string? EmbeddingTextHash { get; set; }
+}
+
+// One Owned Game as read from raw/collection-owned.xml (see ReadCollection)
+class SeedOwnedGame
+{
+    public string Name { get; set; } = "";
+    public DateTime DateAcquired { get; set; }
+    public string Condition { get; set; } = "";   // a Condition enum name, e.g. "Good"
+    public string Notes { get; set; } = "";
+}
+
+// One Owned Game as stored in the ownedGames container. A copy of the web project's OwnedGameDocument
+// (MeepleLedger/Storage/MeepleDocuments.cs): same properties, serialized in camelCase. Keep them in step.
+class SeedOwnedGameDocument
+{
+    public string Id { get; set; } = "";
+    public string OwnerName { get; set; } = "";
+    public string GameName { get; set; } = "";
+    public string DateAcquired { get; set; } = "";
+    public string Condition { get; set; } = "";
+    public string? Notes { get; set; }
 }
 
 // One Game as stored in the PostgreSQL games table (infra/postgres/games-schema.sql).
